@@ -1,0 +1,6 @@
+# 可选增强依赖（不装也能跑，但装上结果更准）
+dnspython>=2.1
+cryptography>=3.4
+
+# 图形界面依赖（启动界面.bat 会自动安装）
+customtkinter>=5.2
