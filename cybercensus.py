@@ -27,10 +27,12 @@ import csv
 import ipaddress
 import json
 import os
+import random
 import re
 import socket
 import ssl
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -67,9 +69,42 @@ except Exception:
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-IPHONE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
-             "Mobile/15E148 MicroMessenger/8.0.40")
+
+# 探测目标时的 UA 轮换池（降低被 WAF 按单一 UA 拉黑的概率）。
+# 搜索引擎查询保持固定 UA（轮换反而容易触发人机验证）。
+UA_POOL = (
+    UA,
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+)
+
+
+def _pick_ua():
+    return random.choice(UA_POOL)
+
+
+# 全局探测节流：跨线程的请求间隔下限（--probe-interval 控制，默认 0=不节流）。
+# 授权测试的正确姿势是申请 WAF 白名单；这里是"礼貌探测"而非规避。
+_PROBE_LOCK = threading.Lock()
+_PROBE_LAST = [0.0]
+
+
+def _global_throttle(interval):
+    if not interval or interval <= 0:
+        return
+    with _PROBE_LOCK:
+        wait = _PROBE_LAST[0] + interval - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _PROBE_LAST[0] = time.time()
+
 
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
@@ -216,9 +251,9 @@ def log(msg, level="*"):
 # HTTP 基础
 # ----------------------------------------------------------------------------
 def http_get(url, timeout=15, retries=2, headers=None, binary=False,
-             max_bytes=4 * 1024 * 1024):
+             max_bytes=4 * 1024 * 1024, throttle=0.0, ua=None):
     hdrs = {
-        "User-Agent": UA,
+        "User-Agent": ua or _pick_ua(),
         "Accept": "*/*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Connection": "close",
@@ -228,6 +263,7 @@ def http_get(url, timeout=15, retries=2, headers=None, binary=False,
     last_err = None
     for i in range(retries + 1):
         try:
+            _global_throttle(throttle)
             req = urllib.request.Request(url, headers=hdrs)
             with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as r:
                 data = r.read(max_bytes)
@@ -252,7 +288,7 @@ def http_get(url, timeout=15, retries=2, headers=None, binary=False,
     raise last_err
 
 
-def http_probe(host, port, scheme, timeout=8):
+def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     """返回 dict：status/title/server/powered/beian/analytics/favicon/tech/body_len"""
     if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
         url = "%s://%s/" % (scheme, host)
@@ -266,7 +302,8 @@ def http_probe(host, port, scheme, timeout=8):
     status = ""
     hdrs = {}
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        _global_throttle(throttle)
+        req = urllib.request.Request(url, headers={"User-Agent": _pick_ua()})
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as r:
                 status = r.status
@@ -616,10 +653,11 @@ def search_engine_lookup(name, timeout=15):
     try:
         url = ("https://cn.bing.com/search?q=" + urllib.parse.quote(name)
                + "&count=20&mkt=zh-CN")
+        # 搜索引擎查询用固定 UA：轮换 UA 反而容易触发人机验证
         html = http_get(url, timeout=timeout, retries=1,
-                        headers={"Accept": "text/html, */*"})
-        hosts = [h.lower() for h in
-                 re.findall(r'<h2><a[^>]+href="https?://([^/\"]+)', html)]
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        hosts = [h.lower() for h
+                 in re.findall(r'<h2><a[^>]+href="https?://([^/\"]+)', html)]
         return _strip_tags(html), hosts
     except Exception as e:
         log("搜索引擎查询失败(%s): %s" % (name, str(e)[:80]), "!")
@@ -748,7 +786,7 @@ class Asset(object):
                  "powered", "tech", "cert_org", "cert_san", "beian",
                  "analytics", "favicon", "source", "evidence", "confidence",
                  "error", "prov_kinds", "providers", "prov_beian", "prov_cert",
-                 "prov_org", "reject_reason", "urls")
+                 "prov_org", "reject_reason", "urls", "findings")
 
     def __init__(self, host, port=None, scheme=None):
         self.host = host
@@ -776,6 +814,7 @@ class Asset(object):
         self.prov_org = ""        # 平台返回的组织名
         self.reject_reason = ""   # 剔除原因
         self.urls = set()
+        self.findings = set()     # 敏感路径发现 ["路径|说明", ...]
 
     def key(self):
         p = self.port or (443 if self.scheme == "https" else 80 if self.scheme == "http" else "")
@@ -793,7 +832,7 @@ class Asset(object):
 
 def _merge_assets(dst, src):
     """字段级合并：集合字段取并集，标量字段空才填（src 的证据不覆盖 dst 已有值）。"""
-    for s in ("source", "providers", "prov_kinds", "urls"):
+    for s in ("source", "providers", "prov_kinds", "urls", "findings"):
         getattr(dst, s).update(getattr(src, s))
     for s in ("ip", "title", "server", "scheme", "status", "beian", "prov_beian",
               "prov_cert", "prov_org", "cert_org", "cert_san", "analytics", "favicon"):
@@ -837,6 +876,120 @@ WEB_PORTS = frozenset((
 
 def is_web_port(p):
     return p in WEB_PORTS
+
+
+# ----------------------------------------------------------------------------
+# 敏感路径探测（授权渗透信息收集：泄露面检查）
+#
+# 设计原则：
+# 1. 每条路径都带**内容验证**——只看 200 状态码会被全站自定义 404 页骗，
+#    必须检查响应体特征（git 配置的 [core]、env 的 KEY=VALUE、zip 的 PK 魔数等）。
+# 2. 高信噪比精选而非大字典：每条都是渗透实测高频命中项。
+# 3. 属于主动触碰目标：仅 active/verify 模式对已存活的 Web 资产执行。
+# ----------------------------------------------------------------------------
+
+def _chk_git(b):
+    return b"[core]" in b
+
+
+def _chk_svn(b):
+    return len(b) > 0 and (b[:1].isdigit() or b[:4] == b"dir ")  # svn entries 格式
+
+
+def _chk_env(b):
+    return re.search(rb"^[A-Z_]{3,}=.{3,}", b, re.M) is not None
+
+
+def _chk_actuator(b):
+    return b"_links" in b or b"management" in b[:2000].lower()
+
+
+def _chk_actuator_env(b):
+    return b"propertySources" in b or b"activeProfiles" in b
+
+
+def _chk_heapdump(b):
+    # Java 堆转储魔数 "\x00JAVA PROFILE..."，且确实有体积
+    return b"JAVA PROFILE" in b[:32] and len(b) > 4096
+
+
+def _chk_swagger(b):
+    return b"swagger" in b.lower()
+
+
+def _chk_apidocs(b):
+    return b"swagger" in b.lower() or b'"paths"' in b
+
+
+def _chk_druid(b):
+    return b"druid" in b.lower()
+
+
+def _chk_serverstatus(b):
+    return b"Apache Status" in b or b"server-status" in b.lower()
+
+
+def _chk_phpinfo(b):
+    return b"PHP Version" in b or b"phpinfo" in b.lower()
+
+
+def _chk_h2(b):
+    return b"H2 Console" in b or b"h2-console" in b.lower()
+
+
+def _chk_zip(b):
+    # zip 魔数 PK\x03\x04，且 >2KB（排除巧合的小文件/错误页）
+    return b[:4] == b"PK\x03\x04" and len(b) > 2048
+
+
+def _chk_rar(b):
+    return b[:4] == b"Rar!" and len(b) > 2048
+
+
+SENSITIVE_PATHS = (
+    ("/.git/config",          "Git仓库泄露(.git)",       _chk_git),
+    ("/.svn/entries",         "SVN仓库泄露(.svn)",       _chk_svn),
+    ("/.env",                 "环境配置泄露(.env)",       _chk_env),
+    ("/actuator",             "Spring Actuator暴露",      _chk_actuator),
+    ("/actuator/env",         "Spring环境信息泄露",       _chk_actuator_env),
+    ("/actuator/heapdump",    "Java堆转储可下载",         _chk_heapdump),
+    ("/swagger-ui.html",      "Swagger文档暴露",          _chk_swagger),
+    ("/swagger-ui/index.html", "Swagger文档暴露",         _chk_swagger),
+    ("/v2/api-docs",          "API接口文档泄露",          _chk_apidocs),
+    ("/druid/index.html",     "Druid监控台暴露",          _chk_druid),
+    ("/server-status",        "Apache状态页暴露",         _chk_serverstatus),
+    ("/phpinfo.php",          "phpinfo信息泄露",          _chk_phpinfo),
+    ("/h2-console",           "H2数据库控制台暴露",       _chk_h2),
+    ("/web.zip",              "站点备份文件(web.zip)",    _chk_zip),
+    ("/www.zip",              "站点备份文件(www.zip)",    _chk_zip),
+    ("/backup.zip",           "站点备份文件(backup.zip)", _chk_zip),
+    ("/site.zip",             "站点备份文件(site.zip)",   _chk_zip),
+    ("/web.rar",              "站点备份文件(web.rar)",    _chk_rar),
+)
+
+
+def probe_sensitive_paths(host, port, scheme, timeout=6, interval=0.1):
+    """对单个 Web 资产探测敏感路径，返回命中的 [(路径, 说明), ...]。
+
+    每个请求间 sleep(interval) 控制节奏；异常静默（探测目标不在线/超时属常态）。
+    """
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        base = "%s://%s" % (scheme, host)
+    else:
+        base = "%s://%s:%d" % (scheme, host, port)
+    hits = []
+    for path, name, check in SENSITIVE_PATHS:
+        try:
+            # 泄露文件可能较大（heapdump/备份包），但只需头部判断特征，限 256KB
+            data = http_get(base + path, timeout=timeout, retries=0,
+                            binary=True, max_bytes=256 * 1024)
+            if check(data):
+                hits.append((path, name))
+        except Exception:
+            pass
+        if interval:
+            time.sleep(interval)
+    return hits
 
 
 # ----------------------------------------------------------------------------
@@ -1272,6 +1425,49 @@ class Engine(object):
                 # 注意：探测到的备案号/统计ID/favicon 只作为该资产自身证据，
                 # 不再回填到全局锚点，避免"任取一个第三方站点当锚点"的自我印证误报。
 
+    # ---- 3.5 敏感路径探测（授权渗透信息收集） ----
+    def probe_sensitive(self, limit=200):
+        """对已存活的 Web 资产探测敏感路径（.git/.env/Actuator/Swagger/备份包等）。
+
+        结果挂到 Asset.findings，不参与归属分级（泄露是资产内容信息，不是归属证据）。
+        """
+        log("== 敏感路径探测（%d 条规则）==" % len(SENSITIVE_PATHS), "#")
+        targets = []
+        for a in self.assets.values():
+            if not a.host or not a.port:
+                continue
+            if is_web_port(int(a.port)) and a.status:
+                targets.append(a)
+        if limit and len(targets) > limit:
+            log("Web 资产过多（%d），仅探测前 %d 个" % (len(targets), limit), "!")
+            targets = targets[:limit]
+        log("待探测 Web 资产: %d" % len(targets))
+        interval = getattr(self.args, "probe_interval", 0) or 0
+
+        def _job(a):
+            scheme = a.scheme or ("https" if int(a.port) in (443, 8443, 9443) else "http")
+            hits = probe_sensitive_paths(a.host, int(a.port), scheme,
+                                         timeout=self.args.timeout,
+                                         interval=max(0.05, interval / 2.0 or 0.05))
+            return a, hits
+
+        found = 0
+        with ThreadPoolExecutor(max_workers=max(1, min(self.args.threads, 8))) as ex:
+            futs = [ex.submit(_job, a) for a in targets]
+            for f in as_completed(futs):
+                try:
+                    a, hits = f.result()
+                except Exception:
+                    continue
+                for path, name in hits:
+                    a.findings.add("%s|%s" % (path, name))
+                if hits:
+                    found += 1
+                    log("  [!] %s:%s 敏感发现: %s" % (
+                        a.host, a.port, "、".join(n for _, n in hits)), "!")
+        log("敏感路径探测完成：%d/%d 个资产存在敏感发现" % (found, len(targets)),
+            "+" if found else "*")
+
     # ---- 2.5 多平台聚合 ----
     def collect_providers(self):
         if not HAVE_PROVIDERS:
@@ -1525,18 +1721,16 @@ class Engine(object):
                 a.reject_reason = "第三方云/CDN资源，且无强关联证据"
             a.evidence = ev
 
-    # ---- 5. 输出 ----
-    def output(self):
-        log("== 阶段5: 生成报告 ==", "#")
-        outdir = self.args.out
-        if not os.path.isdir(outdir):
-            os.makedirs(outdir)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = os.path.join(outdir, "cybercensus_%s" % ts)
+    # ---- 4.5 增量监控（基线对比 + 新资产告警） ----
+    BASELINE_NAME = "baseline.json"
 
-        # 合并"仅主机"占位资产（被动阶段 host-only 条目）到同主机的带端口资产：
-        # 否则报告里同一主机会出现一行"无端口无标题"的重复行，新手看着像脏数据。
-        # 占位资产累积的来源/证据通过 _merge_assets 并入，不丢信息。
+    def _merge_placeholders(self):
+        """合并"仅主机"占位资产（被动阶段 host-only 条目）到同主机的带端口资产。
+
+        否则报告里同一主机会出现一行"无端口无标题"的重复行；
+        基线对比也必须先做这一步，否则占位键会造成"新增+下线"误报。
+        幂等：无占位资产时无操作。
+        """
         with_ports = {}
         for a in self.assets.values():
             if a.port and a.host:
@@ -1550,6 +1744,97 @@ class Engine(object):
                         _merge_assets(t, ph)
                     del self.assets[k]
 
+    def _baseline_path(self):
+        return os.path.join(self.args.out, self.BASELINE_NAME)
+
+    def _fingerprint(self, a):
+        """资产指纹（基线对比的稳定字段）。"""
+        return {
+            "ip": a.ip or "",
+            "confidence": a.confidence,
+            "title": (a.title or "")[:80],
+            "tech": a.tech or "",
+            "findings": sorted(a.findings),
+        }
+
+    def load_baseline(self):
+        """读上一轮基线；不存在/损坏返回 None。"""
+        try:
+            with open(self._baseline_path(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def diff_baseline(self):
+        """与输出目录中的上一轮基线对比，返回 diff dict（无基线返回 None）。
+
+        diff = {"prev_ts":..., "added": [...], "removed": [...],
+                "changed": [{"key":..., "changes": ["新敏感发现: ...", ...]}]}
+        """
+        base = self.load_baseline()
+        if not base or not base.get("assets"):
+            return None
+        self._merge_placeholders()
+        prev = base["assets"]
+        cur = {}
+        for a in self.assets.values():
+            if a.host:
+                cur["%s|%s" % (a.host.lower(), a.port or "")] = self._fingerprint(a)
+        diff = {"prev_ts": base.get("ts", "?"), "added": [], "removed": [], "changed": []}
+        for k in sorted(set(cur) - set(prev)):
+            diff["added"].append((k, cur[k]))
+        for k in sorted(set(prev) - set(cur)):
+            diff["removed"].append((k, prev[k]))
+        for k in sorted(set(cur) & set(prev)):
+            changes = []
+            if cur[k]["confidence"] != prev[k]["confidence"]:
+                changes.append("分级 %s → %s" % (prev[k]["confidence"], cur[k]["confidence"]))
+            for f, label in (("title", "标题"), ("tech", "指纹")):
+                if cur[k][f] != prev[k][f] and (cur[k][f] or prev[k][f]):
+                    changes.append("%s变化" % label)
+            new_findings = set(cur[k]["findings"]) - set(prev[k]["findings"])
+            for fd in sorted(new_findings):
+                changes.append("新敏感发现: %s" % fd.split("|", 1)[-1])
+            if changes:
+                diff["changed"].append({"key": k, "changes": changes})
+        # 日志告警（报告里也会写一节）
+        n = len(diff["added"]) + len(diff["removed"]) + len(diff["changed"])
+        if n:
+            log("== 增量对比（基线 %s）==" % diff["prev_ts"], "#")
+            for k, fp in diff["added"]:
+                log("  [新增] %s（%s）" % (k, fp["confidence"]), "+")
+            for c in diff["changed"]:
+                log("  [变化] %s：%s" % (c["key"], "；".join(c["changes"])), "!")
+            for k, fp in diff["removed"]:
+                log("  [下线] %s" % k, "-")
+        return diff if n else None
+
+    def save_baseline(self):
+        """把本轮资产指纹写为基线（固定文件名，每轮覆盖）。"""
+        try:
+            self._merge_placeholders()
+            os.makedirs(self.args.out, exist_ok=True)
+            snap = {
+                "ts": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                "assets": {"%s|%s" % ((a.host or "").lower(), a.port or ""): self._fingerprint(a)
+                           for a in self.assets.values() if a.host},
+            }
+            with open(self._baseline_path(), "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False, indent=1)
+        except Exception as e:
+            log("基线保存失败: %s" % str(e)[:80], "!")
+
+    # ---- 5. 输出 ----
+    def output(self, baseline_diff=None):
+        log("== 阶段5: 生成报告 ==", "#")
+        outdir = self.args.out
+        if not os.path.isdir(outdir):
+            os.makedirs(outdir)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = os.path.join(outdir, "cybercensus_%s" % ts)
+
+        self._merge_placeholders()
+
         rows = sorted(self.assets.values(),
                       key=lambda a: ({"确认": 0, "疑似": 1, "存疑": 2}.get(a.confidence, 3),
                                      a.host or "", str(a.port or "")))
@@ -1561,7 +1846,7 @@ class Engine(object):
                 "server", "tech", "cert_org", "cert_san", "beian", "analytics",
                 "favicon", "providers", "prov_kinds", "prov_beian", "prov_cert",
                 "prov_org", "source", "evidence", "reject_reason", "urls",
-                "plain"]
+                "plain", "findings"]
 
         def write_csv(path, items):
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -1579,6 +1864,7 @@ class Engine(object):
                         ";".join(a.evidence), a.reject_reason,
                         ";".join(sorted(a.urls)),
                         plain_evidence(a.evidence),
+                        ";".join(sorted(a.findings)),
                     ])
 
         # 输出格式选择（--formats / 界面开关）：md / csv / json；未指定=全出
@@ -1625,7 +1911,7 @@ class Engine(object):
         if "md" in fmts:
             md_path = base + ".md"
             with open(md_path, "w", encoding="utf-8") as f:
-                f.write(self._report(rows, groups, ts))
+                f.write(self._report(rows, groups, ts, baseline_diff))
 
         for k in ("confirmed", "suspect", "rejected", "all"):
             if k in files:
@@ -1636,7 +1922,7 @@ class Engine(object):
             log("MD        %s" % md_path, "+")
         return files, json_path, md_path
 
-    def _report(self, rows, groups, ts):
+    def _report(self, rows, groups, ts, baseline_diff=None):
         L = []
         L.append("# CyberCensus 互联网暴露面测绘报告\n")
         L.append("- 生成时间：%s" % ts)
@@ -1708,6 +1994,46 @@ class Engine(object):
         L.append("| 剔除 | %d | 无关联证据/第三方资源，已排除 |" % len(groups["存疑"]))
         L.append("| **合计** | **%d** | |" % len(rows))
         L.append("")
+
+        # ---- 增量对比（有基线且有变化时） ----
+        if baseline_diff:
+            L.append("## 增量对比（对比上轮 %s）\n" % baseline_diff.get("prev_ts", "?"))
+            if baseline_diff.get("added"):
+                L.append("**新增资产 %d 个**：\n" % len(baseline_diff["added"]))
+                L.append("| 资产 | 分级 |")
+                L.append("|------|------|")
+                for k, fp in baseline_diff["added"]:
+                    L.append("| %s | %s |" % (_md(k), _md(fp["confidence"])))
+                L.append("")
+            if baseline_diff.get("changed"):
+                L.append("**发生变化 %d 个**：\n" % len(baseline_diff["changed"]))
+                L.append("| 资产 | 变化 |")
+                L.append("|------|------|")
+                for c in baseline_diff["changed"]:
+                    L.append("| %s | %s |" % (_md(c["key"]), _md("；".join(c["changes"]))))
+                L.append("")
+            if baseline_diff.get("removed"):
+                L.append("**已下线 %d 个**（本轮未再发现，可能已关停）：\n"
+                         % len(baseline_diff["removed"]))
+                L.append("| 资产 |")
+                L.append("|------|")
+                for k, fp in baseline_diff["removed"]:
+                    L.append("| %s |" % _md(k))
+                L.append("")
+            L.append("> 新增资产请人工核实是否为最新上线业务；新敏感发现建议尽快处理。\n")
+
+        # ---- 敏感路径发现 ----
+        found_assets = [a for a in rows if a.findings]
+        if found_assets:
+            L.append("## ⚠️ 敏感路径发现（%d 个资产）\n" % len(found_assets))
+            L.append("以下资产存在信息泄露或管理后台暴露，**建议优先处理**：\n")
+            L.append("| 资产 | 分级 | 发现 |")
+            L.append("|------|------|------|")
+            for a in found_assets:
+                names = "、".join(sorted(f.split("|", 1)[-1] for f in a.findings))
+                L.append("| %s:%s | %s | %s |" % (_md(a.host), _md(str(a.port or "")),
+                                                  _md(a.confidence), _md(names)))
+            L.append("")
 
         def table(items, show_reason=False):
             if not items:
@@ -1908,6 +2234,14 @@ def build_parser():
                    help="被动模式下，对发现的主机做 HTTP 探测（默认不做，避免打扰目标）")
     p.add_argument("--probe-limit", type=int, default=100,
                    help="--probe-found 时最多探测多少个主机（默认100）")
+    p.add_argument("--probe-interval", type=float, default=0, dest="probe_interval",
+                   help="主动 HTTP 探测的全局请求间隔秒数（默认0=不节流；建议 0.1~0.5 降噪）")
+    p.add_argument("--sensitive", action="store_true",
+                   help="对存活 Web 资产做敏感路径探测（.git/.env/Actuator/Swagger/备份等；active 模式默认开启）")
+    p.add_argument("--no-sensitive", action="store_true",
+                   help="关闭敏感路径探测（即使 active 模式也不跑）")
+    p.add_argument("--sensitive-limit", type=int, default=200,
+                   help="敏感路径探测最多覆盖多少个 Web 资产（默认200）")
     p.add_argument("--yes", action="store_true", help="跳过主动扫描的授权确认")
     p.add_argument("--quiet", action="store_true", help="少输出")
 
@@ -1982,12 +2316,20 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
             log("== 阶段3: 轻量探测（对被动发现的主机做 HTTP 探测）==", "#")
             eng.probe_all_web(include_unported=True,
                               limit=(args.probe_limit or 100))
+        # 敏感路径探测：显式 --sensitive 或 active 模式默认开（--no-sensitive 强制关）
+        do_sens = (not getattr(args, "no_sensitive", False)) and (
+            getattr(args, "sensitive", False) or args.active)
+        if do_sens and not _stopped():
+            eng.probe_sensitive(limit=getattr(args, "sensitive_limit", 200))
     if _stopped():
         log("已请求停止：对已收集的数据做分级输出。", "!")
     eng.evaluate()
+    # 增量监控：与输出目录中的上一轮基线对比（新资产/新端口/新敏感发现告警）
+    baseline_diff = eng.diff_baseline()
+    eng.save_baseline()
     if not do_output:
         return eng, {}, "", ""
-    files, json_path, md_path = eng.output()
+    files, json_path, md_path = eng.output(baseline_diff=baseline_diff)
     return eng, files, json_path, md_path
 
 

@@ -66,6 +66,7 @@ class TestAssetRows(unittest.TestCase):
         a1 = e.add_asset("b.example.com", 443, "https", source="anchor")
         a1.title = "确认站"
         a1.beian = "京ICP备12345678号"
+        a1.findings.add("/.git/config|Git仓库泄露(.git)")
         e.anchor["beian"].add("京ICP备12345678号")
         a2 = e.add_asset("a.example.com", None, None, source="passive")
         e.evaluate()
@@ -74,11 +75,14 @@ class TestAssetRows(unittest.TestCase):
         # 排序：确认在前
         self.assertEqual(rows[0][0], "确认")
         self.assertEqual(rows[0][1], "b.example.com")
+        # 敏感发现列：去掉路径前缀只留说明
+        self.assertIn("Git仓库泄露", rows[0][5])
+        self.assertEqual(rows[1][5], "")
         # 归属说明是白话（含"备案号"字样），不是原始 A| 证据串
-        self.assertIn("备案号", rows[0][5])
+        self.assertIn("备案号", rows[0][6])
         # tag 映射正确
-        self.assertEqual(rows[0][6], "confirmed")
-        self.assertEqual(rows[1][6], "unknown")
+        self.assertEqual(rows[0][7], "confirmed")
+        self.assertEqual(rows[1][7], "unknown")
 
     def test_empty_engine(self):
         import argparse

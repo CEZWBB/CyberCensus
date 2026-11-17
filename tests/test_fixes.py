@@ -695,5 +695,113 @@ class TestOutputFormats(unittest.TestCase):
         self.assertEqual(len(produced), 5)
 
 
+# ----------------------------------------------------------------------------
+# 敏感路径探测：内容验证判定（防自定义404误报的核心）
+# ----------------------------------------------------------------------------
+class TestSensitiveChecks(unittest.TestCase):
+    def test_git_config(self):
+        self.assertTrue(cybercensus._chk_git(b"[core]\n\trepositoryformatversion = 0"))
+        self.assertFalse(cybercensus._chk_git(b"<html><body>404 not found</body></html>"))
+
+    def test_env(self):
+        self.assertTrue(cybercensus._chk_env(b"APP_NAME=demo\nDB_HOST=127.0.0.1"))
+        self.assertFalse(cybercensus._chk_env(b"<html>error page</html>"))
+
+    def test_heapdump_magic(self):
+        self.assertTrue(cybercensus._chk_heapdump(b"\x00JAVA PROFILE 1.0.1" + b"x" * 8192))
+        self.assertFalse(cybercensus._chk_heapdump(b"\x00JAVA PROFILE 1.0.1"))   # 太小
+        self.assertFalse(cybercensus._chk_heapdump(b"<html>login</html>" * 1000))
+
+    def test_zip_magic(self):
+        self.assertTrue(cybercensus._chk_zip(b"PK\x03\x04" + b"x" * 4096))
+        self.assertFalse(cybercensus._chk_zip(b"PK\x03\x04xx"))          # 太小
+        self.assertFalse(cybercensus._chk_zip(b"<html>" + b"x" * 4096))  # 非 zip
+
+    def test_swagger_and_druid(self):
+        self.assertTrue(cybercensus._chk_swagger(b"<html>Swagger UI</html>"))
+        self.assertFalse(cybercensus._chk_swagger(b"<html>Index</html>"))
+        self.assertTrue(cybercensus._chk_druid(b"druid stat view"))
+        self.assertFalse(cybercensus._chk_druid(b"welcome"))
+
+    def test_probe_sensitive_paths(self):
+        """monkeypatch http_get：命中 .git/config，未命中 .env。"""
+        def fake_get(url, **kw):
+            if url.endswith("/.git/config"):
+                return b"[core]\n\tbare = false"
+            raise OSError("404")
+        orig = cybercensus.http_get
+        cybercensus.http_get = fake_get
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        hits = cybercensus.probe_sensitive_paths("x.com", 443, "https", interval=0)
+        self.assertEqual(hits, [("/.git/config", "Git仓库泄露(.git)")])
+
+
+# ----------------------------------------------------------------------------
+# 增量监控：基线保存与 diff
+# ----------------------------------------------------------------------------
+class TestBaseline(unittest.TestCase):
+    def _engine(self, outdir):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.args.out = outdir
+        return e
+
+    def test_save_and_diff_cycle(self):
+        out = tempfile.mkdtemp(prefix="sm_bl_")
+        try:
+            # 第一轮：1 资产，无基线 → diff=None，保存基线
+            e = self._engine(out)
+            a = e.add_asset("www.x.com", 443, "https", source="anchor")
+            a.title = "官网"
+            a.beian = "京ICP备12345678号"
+            e.anchor["beian"].add("京ICP备12345678号")
+            e.evaluate()
+            self.assertIsNone(e.diff_baseline())
+            e.save_baseline()
+            self.assertTrue(os.path.isfile(os.path.join(out, "baseline.json")))
+
+            # 第二轮：新增资产 + 原资产新增敏感发现 → diff 应报出
+            e2 = self._engine(out)
+            a2 = e2.add_asset("www.x.com", 443, "https", source="anchor")
+            a2.title = "官网"
+            a2.beian = "京ICP备12345678号"
+            a2.findings.add("/.env|环境配置泄露(.env)")
+            b2 = e2.add_asset("new.y.com", 80, "http", source="passive")
+            e2.anchor["beian"].add("京ICP备12345678号")
+            e2.evaluate()
+            diff = e2.diff_baseline()
+            self.assertIsNotNone(diff)
+            added_keys = [k for k, _ in diff["added"]]
+            self.assertIn("new.y.com|80", added_keys)
+            self.assertEqual(len(diff["removed"]), 0)
+            changes = {c["key"]: c["changes"] for c in diff["changed"]}
+            self.assertIn("www.x.com|443", changes)
+            self.assertTrue(any("新敏感发现" in c for c in changes["www.x.com|443"]))
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_baseline_corrupt_tolerated(self):
+        out = tempfile.mkdtemp(prefix="sm_bl2_")
+        try:
+            with open(os.path.join(out, "baseline.json"), "w", encoding="utf-8") as f:
+                f.write("{not json")
+            e = self._engine(out)
+            self.assertIsNone(e.load_baseline())   # 损坏基线不崩溃
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+
+# ----------------------------------------------------------------------------
+# UA 轮换池
+# ----------------------------------------------------------------------------
+class TestUAPool(unittest.TestCase):
+    def test_pick_ua_always_from_pool(self):
+        for _ in range(50):
+            self.assertIn(cybercensus._pick_ua(), cybercensus.UA_POOL)
+
+    def test_pool_has_variety(self):
+        # 至少 4 种不同 UA（Windows/Mac/Firefox/Edge 多样性）
+        self.assertGreaterEqual(len(set(cybercensus.UA_POOL)), 4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -111,13 +111,16 @@ def parse_targets(text):
 def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
-               formats=None):
+               formats=None, sensitive=None, probe_interval=0.0):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
     formats: 输出格式列表（"md"/"csv"/"json" 的子集），空=全部
+    sensitive: 敏感路径探测（None=跟随模式：active 开，其它关）
     """
     active = (mode == "active")
+    if sensitive is None:
+        sensitive = active
     args = argparse.Namespace(
         beian="",
         threads=max(1, int(threads)),
@@ -129,6 +132,10 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         no_discover=False,   # 名称模式默认启用搜索引擎官网自举（被动模式自动跳过）
         probe_found=False,
         probe_limit=100,
+        probe_interval=float(probe_interval or 0),
+        sensitive=bool(sensitive),
+        no_sensitive=not sensitive,
+        sensitive_limit=200,
         verify=(mode == "verify"),
         verify_limit=0,
         active=active,
@@ -165,7 +172,7 @@ def _to_int(s, default):
 
 
 def asset_rows(eng, max_evidence=2):
-    """从引擎结果提取表格行：[(分类, 主机, IP, 端口, 标题, 归属说明, tag), ...]。
+    """从引擎结果提取表格行：[(分类, 主机, IP, 端口, 标题, 敏感发现, 归属说明, tag), ...]。
 
     按 确认 → 疑似 → 存疑 排序；归属说明用白话证据（截断到 max_evidence 条）。
     纯函数，供界面表格与单元测试共用。
@@ -175,9 +182,10 @@ def asset_rows(eng, max_evidence=2):
     rows = []
     for a in eng.assets.values():
         plain = cybercensus.plain_evidence(a.evidence, max_items=max_evidence) or "—"
+        findings = "、".join(sorted(f.split("|", 1)[-1] for f in a.findings))
         rows.append((
             a.confidence, a.host or a.ip or "", a.ip or "", str(a.port or ""),
-            a.title or "", plain, tag_map.get(a.confidence, "unknown"),
+            a.title or "", findings, plain, tag_map.get(a.confidence, "unknown"),
         ))
     rows.sort(key=lambda r: (order.get(r[0], 3), r[1], r[3]))
     return rows
@@ -343,8 +351,8 @@ class App(ctk.CTk):
 
         # 资产表格（ttk.Treeview，深色样式）
         import tkinter.ttk as ttk
-        cols = ("分类", "主机", "IP", "端口", "标题", "归属说明")
-        widths = (70, 200, 120, 60, 220, 380)
+        cols = ("分类", "主机", "IP", "端口", "标题", "敏感发现", "归属说明")
+        widths = (64, 190, 115, 55, 190, 150, 330)
         self.tree = ttk.Treeview(tab_assets, columns=cols, show="headings",
                                  selectmode="browse")
         for c, w in zip(cols, widths):
@@ -430,6 +438,11 @@ class App(ctk.CTk):
         ctk.CTkButton(f, text="浏览…", width=70, command=self._browse_out
                       ).grid(row=2, column=4, sticky="w")
 
+        self.var_sensitive = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(f, text="敏感路径探测(.git/.env等，主动模式必查)",
+                      variable=self.var_sensitive
+                      ).grid(row=3, column=0, columnspan=3, sticky="w", padx=(14, 0), pady=2)
+
     # ---- 主题 / 选项面板 ----
     def _toggle_theme(self):
         mode = "dark" if self.var_dark.get() else "light"
@@ -464,7 +477,7 @@ class App(ctk.CTk):
         self.tree.delete(*self.tree.get_children())
         for r in asset_rows(eng):
             tag = r[6]
-            self.tree.insert("", "end", values=r[:6], tags=(tag,))
+            self.tree.insert("", "end", values=r[:7], tags=(tag,))
 
     def _apply_log_palette(self, mode):
         for tag, color in LOG_PALETTE[mode].items():
@@ -622,6 +635,8 @@ class App(ctk.CTk):
             full_ports=self.var_fullports.get(),
             out=outdir,
             debug_provider=self.var_debug.get(),
+            sensitive=self.var_sensitive.get(),
+            probe_interval=0.0,
         )
         self._last_out_dir = args.out
 
