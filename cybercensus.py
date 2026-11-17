@@ -83,6 +83,11 @@ UA_POOL = (
     "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+    # 移动端 UA：很多公众号/移动端系统在桌面 UA 下显示不全或被拦截
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
 )
 
 
@@ -695,6 +700,110 @@ def discover_domains_from_search(name, max_candidates=5):
     return out[:max_candidates]
 
 
+# ----------------------------------------------------------------------------
+# 扩展被动源（全部免费、无 Key、查第三方不触碰目标）：
+# Wayback 历史快照 / OTX 被动 DNS / urlscan 历史扫描 / 搜索引擎 site: 语法 /
+# 搜索引擎备案号反查（无 Key 时唯一的 A 级证据来源）
+# ----------------------------------------------------------------------------
+def wayback_subdomains(domain, timeout=25):
+    """Wayback CDX 历史 URL 提取子域。
+
+    历史快照里埋着已下线/改名的子域——crt.sh 只能看到签过证书的，
+    Wayback 能看到曾经被收录访问过的，两者互补。
+    """
+    subs = set()
+    try:
+        url = ("http://web.archive.org/cdx/search/cdx?url=*.%s&output=json"
+               "&fl=original&collapse=urlkey&limit=2000" % domain)
+        txt = http_get(url, timeout=timeout, retries=1)
+        data = json.loads(txt)
+        for row in (data[1:] if isinstance(data, list) else []):
+            if not row:
+                continue
+            m = re.match(r"[a-zA-Z]+://([^/:?]+)", str(row[0]))
+            if m:
+                h = m.group(1).strip(".").lower()
+                if h == domain or h.endswith("." + domain):
+                    subs.add(h)
+    except Exception:
+        pass
+    return subs
+
+
+def otx_subdomains(domain, timeout=25):
+    """AlienVault OTX 被动 DNS 子域（免费开放 API）。"""
+    subs = set()
+    try:
+        url = ("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns"
+               % urllib.parse.quote(domain))
+        txt = http_get(url, timeout=timeout, retries=1)
+        data = json.loads(txt)
+        for e in data.get("passive_dns", []) or []:
+            h = str(e.get("hostname", "")).strip().lower().rstrip(".")
+            if h == domain or h.endswith("." + domain):
+                subs.add(h)
+    except Exception:
+        pass
+    return subs
+
+
+def urlscan_subdomains(domain, timeout=25):
+    """urlscan.io 历史扫描记录提取子域（免费搜索 API）。
+
+    能捞到没备案、没证书、但被人扫描过的站——与 CT 日志互补。
+    """
+    subs = set()
+    try:
+        url = ("https://urlscan.io/api/v1/search/?q=domain:%s&size=1000"
+               % urllib.parse.quote(domain))
+        txt = http_get(url, timeout=timeout, retries=1)
+        data = json.loads(txt)
+        for r in data.get("results", []) or []:
+            page = (r.get("page") or {})
+            h = str(page.get("domain", "")).strip().lower().rstrip(".")
+            if h == domain or h.endswith("." + domain):
+                subs.add(h)
+    except Exception:
+        pass
+    return subs
+
+
+def bing_site_subdomains(domain):
+    """搜索引擎 site: 语法反查已收录子域（免费无 Key）。"""
+    text, hosts = search_engine_lookup("site:" + domain)
+    out = set()
+    for h in hosts:
+        h = (h or "").lower().rstrip(".")
+        if h == domain or h.endswith("." + domain):
+            out.add(h)
+    for m in _DOMAIN_IN_TEXT_RE.finditer(text):
+        h = m.group(1).lower()
+        if h == domain or h.endswith("." + domain):
+            out.add(h)
+    return out
+
+
+def bing_beian_search(beian):
+    """搜索引擎搜备案号：页面里印着同一备案号的站点（A 级证据线索）。
+
+    对应方法论文档的"备案号是最强反查钥匙"——拿到锚点备案号后反查，
+    能找到所有底部印着这个号的站点（含平台未收录的），误报极低。
+    """
+    text, hosts = search_engine_lookup('"%s"' % beian)
+    out = []
+    seen = set()
+    for h in hosts:
+        h = (h or "").lower().rstrip(".")
+        if not h or "_" in h or h in seen:
+            continue
+        seen.add(h)
+        root = root_domain(h)
+        if root in SEARCH_JUNK_ROOTS or h in SEARCH_JUNK_ROOTS:
+            continue
+        out.append(h)
+    return out
+
+
 def hackertarget_hostsearch(domain, timeout=20):
     res = {}
     try:
@@ -1183,9 +1292,9 @@ class Engine(object):
                     s = self.add_asset(h, None, None, source="crt:org")
                     s.ip = self.sub_map.get(h, "")
 
-        # 域名 -> 子域名
+        # 域名 -> 子域名（多被动源聚合：证书 / 被动DNS / 历史快照 / 搜索引擎）
         for d in list(dict.fromkeys(domains)):
-            log("crt.sh 子域名: %s" % d)
+            log("子域名收集: %s" % d)
             subs = crt_subdomains(d)
             log("  crt.sh 得到 %d 个" % len(subs))
             ht = hackertarget_hostsearch(d)
@@ -1194,7 +1303,19 @@ class Engine(object):
             rd = rapiddns_subdomains(d)
             if rd:
                 log("  rapiddns 得到 %d 个" % len(rd))
-            allsubs = set(subs) | set(ht.keys()) | set(rd)
+            wb = wayback_subdomains(d)
+            if wb:
+                log("  wayback历史 得到 %d 个" % len(wb))
+            ox = otx_subdomains(d)
+            if ox:
+                log("  OTX被动DNS 得到 %d 个" % len(ox))
+            us = urlscan_subdomains(d)
+            if us:
+                log("  urlscan历史 得到 %d 个" % len(us))
+            bs = bing_site_subdomains(d)
+            if bs:
+                log("  搜索引擎site: 得到 %d 个" % len(bs))
+            allsubs = (set(subs) | set(ht.keys()) | set(rd) | wb | ox | us | bs)
             allsubs.add(d)
             for h in allsubs:
                 ip = ht.get(h, "")
@@ -1228,6 +1349,18 @@ class Engine(object):
                         log("  SPF ip4（仅记录，不作为扫描/查询目标）: %s" % ipm)
                 if "include:" in txt.lower():
                     log("  SPF include: %s" % txt[:120])
+
+        # 备案号反查（搜索引擎免费通道）：锚点备案号 → 页脚印着同一备案号的站点。
+        # 无平台 Key 时唯一的 A 级证据来源；对疑似候选交由 evaluate 的备案号
+        # 主号比较把关（垃圾值提取不出主号不会命中）。
+        for b in sorted(set(self.anchor["beian"])):
+            hosts = bing_beian_search(b)
+            if hosts:
+                log("备案号反查(%s): 搜索引擎命中 %d 个站点" % (b, len(hosts)), "+")
+                for h in hosts:
+                    a = self.add_asset(h, None, None, source="search:beian")
+                    if not a.prov_beian:
+                        a.prov_beian = b
 
         # IP 反查
         all_ips = set(self.input_ips)
@@ -1662,7 +1795,10 @@ class Engine(object):
                 ev.append("A|平台icp命中")
                 A += 1
             if a.prov_beian and _beian_key(a.prov_beian) in beian_keys:
-                ev.append("A|平台返回备案号命中:%s" % a.prov_beian)
+                if "search:beian" in a.source:
+                    ev.append("A|搜索引擎备案号命中:%s" % a.prov_beian)
+                else:
+                    ev.append("A|平台返回备案号命中:%s" % a.prov_beian)
                 A += 1
             if a.prov_cert and any(d and d in a.prov_cert.lower() for d in domains):
                 ev.append("A|平台证书含主域名")
@@ -2095,6 +2231,7 @@ _PLAIN_EVIDENCE = (
     ("A|平台cert命中", "测绘平台证书库显示该站证书含目标单位信息"),
     ("A|平台icp命中", "测绘平台备案库显示该站备案属于目标单位"),
     ("A|平台返回备案号命中", "平台数据显示该站备案号与目标单位一致"),
+    ("A|搜索引擎备案号命中", "搜索引擎收录显示该站页脚印有目标单位备案号"),
     ("A|平台证书含主域名", "该站证书中包含目标单位主域名"),
     ("A|平台domain命中", "测绘平台按目标域名检索命中该站"),
     ("B|统计ID一致", "该站与目标单位官网使用同一个访问统计账号"),

@@ -7,6 +7,7 @@ test_fixes.py —— P0-P2 整改的回归测试（纯标准库，不联网、�
   python -m unittest discover tests -v
 """
 
+import json
 import os
 import shutil
 import sys
@@ -801,6 +802,81 @@ class TestUAPool(unittest.TestCase):
     def test_pool_has_variety(self):
         # 至少 4 种不同 UA（Windows/Mac/Firefox/Edge 多样性）
         self.assertGreaterEqual(len(set(cybercensus.UA_POOL)), 4)
+
+
+# ----------------------------------------------------------------------------
+# 扩展被动源（Wayback / OTX / urlscan / site: 语法 / 备案号反查）
+# ----------------------------------------------------------------------------
+class TestExtraPassiveSources(unittest.TestCase):
+    def _patch_http(self, fake):
+        orig = cybercensus.http_get
+        cybercensus.http_get = fake
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+
+    def _patch_lookup(self, text, hosts):
+        orig = cybercensus.search_engine_lookup
+        cybercensus.search_engine_lookup = lambda q, timeout=15: (text, hosts)
+        self.addCleanup(cybercensus.__setattr__, "search_engine_lookup", orig)
+
+    def test_wayback_parse(self):
+        rows = [["original"],
+                ["https://a.x.com/path", "200"],
+                ["http://b.x.com/", "200"],
+                ["https://unrelated.com/", "200"]]
+        self._patch_http(lambda url, **kw: json.dumps(rows))
+        subs = cybercensus.wayback_subdomains("x.com")
+        self.assertEqual(subs, {"a.x.com", "b.x.com"})
+
+    def test_wayback_fail_empty(self):
+        self._patch_http(lambda url, **kw: (_ for _ in ()).throw(OSError("down")))
+        self.assertEqual(cybercensus.wayback_subdomains("x.com"), set())
+
+    def test_otx_parse(self):
+        data = {"passive_dns": [{"hostname": "a.x.com."}, {"hostname": "b.x.com"},
+                                {"hostname": "other.com"}]}
+        self._patch_http(lambda url, **kw: json.dumps(data))
+        subs = cybercensus.otx_subdomains("x.com")
+        self.assertEqual(subs, {"a.x.com", "b.x.com"})
+
+    def test_urlscan_parse(self):
+        data = {"results": [{"page": {"domain": "a.x.com"}},
+                            {"page": {"domain": "other.com"}}]}
+        self._patch_http(lambda url, **kw: json.dumps(data))
+        self.assertEqual(cybercensus.urlscan_subdomains("x.com"), {"a.x.com"})
+
+    def test_bing_site_subdomains(self):
+        self._patch_lookup("看 a.x.com 和 unrelated.com",
+                           ["a.x.com", "www.x.com", "junk.example.org"])
+        subs = cybercensus.bing_site_subdomains("x.com")
+        self.assertEqual(subs, {"a.x.com", "www.x.com"})
+
+    def test_bing_beian_search_filters_junk(self):
+        self._patch_lookup("", ["www.real.com", "www.qiuyi.cn", "baike.baidu.com",
+                                "www.real.com"])
+        out = cybercensus.bing_beian_search("京ICP备12345678号")
+        self.assertEqual(out, ["www.real.com"])   # 目录站去重+黑名单
+
+    def test_beian_search_evidence_is_a_level(self):
+        """search:beian 来源的资产应得 A 级证据（无 Key 时的确认通道）。"""
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.anchor["beian"].add("京ICP备12345678号")
+        a = e.add_asset("found.example.com", 80, "http", source="search:beian")
+        a.prov_beian = "京ICP备12345678号-2"
+        e.evaluate()
+        self.assertEqual(a.confidence, "确认")
+        self.assertTrue(any(x.startswith("A|搜索引擎备案号命中") for x in a.evidence))
+        self.assertIn("搜索引擎收录显示该站页脚印有目标单位备案号",
+                      cybercensus.plain_evidence(a.evidence))
+
+
+# ----------------------------------------------------------------------------
+# UA 池含移动端（公众号/移动端页面可见性）
+# ----------------------------------------------------------------------------
+class TestUAMobile(unittest.TestCase):
+    def test_pool_contains_mobile_ua(self):
+        joined = " ".join(cybercensus.UA_POOL)
+        self.assertIn("iPhone", joined)
+        self.assertIn("Android", joined)
 
 
 if __name__ == "__main__":
