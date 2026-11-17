@@ -164,6 +164,25 @@ def _to_int(s, default):
         return default
 
 
+def asset_rows(eng, max_evidence=2):
+    """从引擎结果提取表格行：[(分类, 主机, IP, 端口, 标题, 归属说明, tag), ...]。
+
+    按 确认 → 疑似 → 存疑 排序；归属说明用白话证据（截断到 max_evidence 条）。
+    纯函数，供界面表格与单元测试共用。
+    """
+    order = {"确认": 0, "疑似": 1, "存疑": 2}
+    tag_map = {"确认": "confirmed", "疑似": "suspect", "存疑": "unknown"}
+    rows = []
+    for a in eng.assets.values():
+        plain = shadowmap.plain_evidence(a.evidence, max_items=max_evidence) or "—"
+        rows.append((
+            a.confidence, a.host or a.ip or "", a.ip or "", str(a.port or ""),
+            a.title or "", plain, tag_map.get(a.confidence, "unknown"),
+        ))
+    rows.sort(key=lambda r: (order.get(r[0], 3), r[1], r[3]))
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # 主窗口
 # ---------------------------------------------------------------------------
@@ -182,6 +201,7 @@ class App(ctk.CTk):
         self._stop_flag = threading.Event()
         self._last_out_dir = None
         self._last_md_path = None
+        self._last_engine = None
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -315,24 +335,52 @@ class App(ctk.CTk):
         self.card_suspect = self._card(frm_cards, 1, "疑似资产", ORANGE)
         self.card_rejected = self._card(frm_cards, 2, "剔除（存疑）", GRAY)
 
-        # ---- 日志 ----
-        self.txt_log = ctk.CTkTextbox(m, font=ctk.CTkFont(family="Consolas", size=12),
+        # ---- 结果区：资产列表 / 运行日志 双标签页 ----
+        self.tabview = ctk.CTkTabview(m, corner_radius=8, command=self._on_tab_change)
+        self.tabview.pack(fill="both", expand=True, pady=(8, 0))
+        tab_assets = self.tabview.add("资产列表")
+        tab_log = self.tabview.add("运行日志")
+
+        # 资产表格（ttk.Treeview，深色样式）
+        import tkinter.ttk as ttk
+        cols = ("分类", "主机", "IP", "端口", "标题", "归属说明")
+        widths = (70, 200, 120, 60, 220, 380)
+        self.tree = ttk.Treeview(tab_assets, columns=cols, show="headings",
+                                 selectmode="browse")
+        for c, w in zip(cols, widths):
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=w, anchor="w")
+        vsb = ttk.Scrollbar(tab_assets, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.tree.tag_configure("confirmed", foreground=GREEN)
+        self.tree.tag_configure("suspect", foreground=ORANGE)
+        self.tree.tag_configure("unknown", foreground=GRAY)
+        self._style_treeview("dark")
+
+        # 运行日志
+        self.txt_log = ctk.CTkTextbox(tab_log, font=ctk.CTkFont(family="Consolas", size=12),
                                       wrap="word", corner_radius=8)
-        self.txt_log.pack(fill="both", expand=True, pady=(8, 0))
+        self.txt_log.pack(fill="both", expand=True)
         self.txt_log.configure(state="disabled")
         self._apply_log_palette("dark")
+        self.tabview.set("运行日志")   # 扫描过程默认看日志，完成后自动切到资产列表
 
         # ---- 底部按钮 ----
         frm_done = ctk.CTkFrame(m, fg_color="transparent")
         frm_done.pack(fill="x", pady=(8, 0))
+        self.btn_report = ctk.CTkButton(frm_done, text="⬇ 生成报告…", width=130,
+                                        state="disabled", command=self._open_report_dialog)
+        self.btn_report.pack(side="left")
         self.btn_open_out = ctk.CTkButton(frm_done, text="打开输出文件夹",
                                           width=140, state="disabled",
                                           command=self._open_out)
-        self.btn_open_out.pack(side="left")
+        self.btn_open_out.pack(side="left", padx=8)
         self.btn_open_report = ctk.CTkButton(frm_done, text="查看报告 (MD)",
                                              width=140, state="disabled",
                                              command=self._open_report)
-        self.btn_open_report.pack(side="left", padx=8)
+        self.btn_open_report.pack(side="left")
 
     def _card(self, parent, col, caption, color):
         f = ctk.CTkFrame(parent, corner_radius=10)
@@ -382,22 +430,41 @@ class App(ctk.CTk):
         ctk.CTkButton(f, text="浏览…", width=70, command=self._browse_out
                       ).grid(row=2, column=4, sticky="w")
 
-        ctk.CTkLabel(f, text="输出格式").grid(row=3, column=0, sticky="e", padx=(14, 4), pady=6)
-        self.var_fmt_md = ctk.BooleanVar(value=True)
-        ctk.CTkSwitch(f, text="报告(MD)", variable=self.var_fmt_md
-                      ).grid(row=3, column=1, sticky="w")
-        self.var_fmt_csv = ctk.BooleanVar(value=True)
-        ctk.CTkSwitch(f, text="资产台账(CSV)", variable=self.var_fmt_csv
-                      ).grid(row=3, column=2, columnspan=2, sticky="w")
-        self.var_fmt_json = ctk.BooleanVar(value=False)
-        ctk.CTkSwitch(f, text="原始数据(JSON)", variable=self.var_fmt_json
-                      ).grid(row=3, column=4, sticky="w")
-
     # ---- 主题 / 选项面板 ----
     def _toggle_theme(self):
         mode = "dark" if self.var_dark.get() else "light"
         ctk.set_appearance_mode(mode)
         self._apply_log_palette(mode)
+        self._style_treeview(mode)
+
+    def _style_treeview(self, mode):
+        """给 ttk.Treeview 套深/浅色样式（CTk 不带表格控件，嵌入原生 Treeview）。"""
+        import tkinter.ttk as ttk
+        if mode == "dark":
+            bg, fg, head, sel = "#161b22", "#c9d1d9", "#21262d", "#2f81f7"
+        else:
+            bg, fg, head, sel = "#ffffff", "#24292f", "#eaeef2", "#0969da"
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("Treeview", background=bg, foreground=fg, fieldbackground=bg,
+                        rowheight=26, borderwidth=0, font=("", 12))
+        style.configure("Treeview.Heading", background=head, foreground=fg,
+                        relief="flat", font=("", 12, "bold"))
+        style.map("Treeview", background=[("selected", sel)])
+        style.map("Treeview.Heading", background=[("active", head)])
+
+    def _on_tab_change(self):
+        pass   # 预留：点击标签页时的钩子
+
+    def _populate_table(self, eng):
+        """把引擎结果填进资产表格（完成扫描后调用）。"""
+        self.tree.delete(*self.tree.get_children())
+        for r in asset_rows(eng):
+            tag = r[6]
+            self.tree.insert("", "end", values=r[:6], tags=(tag,))
 
     def _apply_log_palette(self, mode):
         for tag, color in LOG_PALETTE[mode].items():
@@ -545,9 +612,6 @@ class App(ctk.CTk):
                 return
         platforms = [n for n, v in self.var_platforms.items() if v.get()]
         outdir = os.path.abspath(self.var_out.get().strip() or "shadowmap_out")
-        formats = [k for k, v in (("md", self.var_fmt_md.get()),
-                                  ("csv", self.var_fmt_csv.get()),
-                                  ("json", self.var_fmt_json.get())) if v]
         args = build_args(
             mode, platforms,
             threads=_to_int(self.cmb_threads.get(), 20),
@@ -558,7 +622,6 @@ class App(ctk.CTk):
             full_ports=self.var_fullports.get(),
             out=outdir,
             debug_provider=self.var_debug.get(),
-            formats=(formats or ["md"]),   # 一个都不选时至少出 MD 报告
         )
         self._last_out_dir = args.out
 
@@ -566,10 +629,14 @@ class App(ctk.CTk):
         self.txt_log.configure(state="normal")
         self.txt_log.delete("1.0", "end")
         self.txt_log.configure(state="disabled")
+        self.tree.delete(*self.tree.get_children())
         for card in (self.card_confirmed, self.card_suspect, self.card_rejected):
             card.configure(text="…")
+        self.btn_report.configure(state="disabled")
         self.btn_open_out.configure(state="disabled")
         self.btn_open_report.configure(state="disabled")
+        self._last_md_path = None
+        self.tabview.set("运行日志")
 
         self._set_running(True)
         self._stop_flag.clear()
@@ -586,10 +653,12 @@ class App(ctk.CTk):
 
     def _run(self, args, names, domains, ips):
         try:
-            eng, files, json_path, md_path = shadowmap.run_pipeline(
+            # 界面模式：只采集+分级，结果先展示在"资产列表"，
+            # 报告由用户点"生成报告"时按所选格式再写文件
+            eng, _files, _jp, _mp = shadowmap.run_pipeline(
                 args, names, domains, ips,
-                should_stop=self._stop_flag.is_set)
-            self._queue.put(("done", (eng, files, json_path, md_path)))
+                should_stop=self._stop_flag.is_set, do_output=False)
+            self._queue.put(("done", (eng,)))
         except Exception:
             self._queue.put(("error", traceback.format_exc()))
 
@@ -615,41 +684,124 @@ class App(ctk.CTk):
                     self._append_log(item[1], item[2])
                 elif item[0] == "done":
                     self._on_done(*item[1])
+                elif item[0] == "report_done":
+                    self._on_report_done(*item[1])
                 elif item[0] == "error":
                     self._on_error(item[1])
         except queue.Empty:
             pass
         self.after(100, self._poll)
 
-    def _on_done(self, eng, files, json_path, md_path):
+    def _on_done(self, eng):
         self._set_running(False)
         self.bar.set(1)
+        self._last_engine = eng
         counts = {"确认": 0, "疑似": 0, "存疑": 0}
         for a in eng.assets.values():
             counts[a.confidence] = counts.get(a.confidence, 0) + 1
         self.card_confirmed.configure(text=str(counts["确认"]))
         self.card_suspect.configure(text=str(counts["疑似"]))
         self.card_rejected.configure(text=str(counts["存疑"]))
+        self._populate_table(eng)
         self._append_log("=" * 60, "#")
         self._append_log("完成：确认 %d | 疑似 %d | 剔除 %d | 合计 %d"
                          % (counts["确认"], counts["疑似"], counts["存疑"], len(eng.assets)), "#")
-        if files.get("confirmed"):
-            self._append_log("确认台账：%s" % files["confirmed"], "+")
-        if files:
-            self.btn_open_out.configure(state="normal")
-        if md_path:
-            self._last_md_path = md_path
-            self._append_log("报告：%s" % md_path, "+")
-            self.btn_open_report.configure(state="normal")
+        if eng.assets:
+            self.btn_report.configure(state="normal")   # 结果就绪，可按需生成报告
+            self.tabview.set("资产列表")
+        else:
+            self._append_log("未发现任何资产，无需生成报告。", "!")
 
     def _on_error(self, tb_text):
         self._set_running(False)
         self.bar.set(0)
         for card in (self.card_confirmed, self.card_suspect, self.card_rejected):
             card.configure(text="—")
+        if getattr(self, "_last_engine", None) is not None:
+            self.btn_report.configure(state="normal")
         self._append_log("运行出错：", "!")
         for line in tb_text.strip().splitlines()[-8:]:
             self._append_log("  " + line, "!")
+
+    # ---- 生成报告（按需导出，用户选格式）----
+    def _open_report_dialog(self):
+        eng = getattr(self, "_last_engine", None)
+        if eng is None:
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("生成报告")
+        win.geometry("460x300")
+        win.resizable(False, False)
+        win.after(300, lambda: win.grab_set())
+
+        ctk.CTkLabel(win, text="选择要导出的报告格式",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w",
+                                                                    padx=18, pady=(16, 8))
+        var_md = ctk.BooleanVar(value=True)
+        var_csv = ctk.BooleanVar(value=True)
+        var_json = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(win, text="可读报告（MD，适合阅读和交付）",
+                      variable=var_md).pack(anchor="w", padx=22, pady=3)
+        ctk.CTkSwitch(win, text="资产台账（CSV，适合 Excel 管理）",
+                      variable=var_csv).pack(anchor="w", padx=22, pady=3)
+        ctk.CTkSwitch(win, text="原始数据（JSON，适合程序处理）",
+                      variable=var_json).pack(anchor="w", padx=22, pady=3)
+
+        frm_dir = ctk.CTkFrame(win, fg_color="transparent")
+        frm_dir.pack(fill="x", padx=18, pady=(10, 4))
+        ctk.CTkLabel(frm_dir, text="保存到").pack(side="left", padx=(0, 6))
+        var_out = ctk.StringVar(value=self.var_out.get().strip() or "shadowmap_out")
+        ctk.CTkEntry(frm_dir, textvariable=var_out).pack(side="left", fill="x",
+                                                         expand=True, padx=(0, 6))
+        ctk.CTkButton(frm_dir, text="浏览…", width=70,
+                      command=lambda: var_out.set(
+                          filedialog.askdirectory(initialdir=BASE_DIR) or var_out.get())
+                      ).pack(side="left")
+
+        def _generate():
+            fmts = [k for k, v in (("md", var_md.get()), ("csv", var_csv.get()),
+                                   ("json", var_json.get())) if v]
+            if not fmts:
+                messagebox.showwarning("未选择格式", "请至少选择一种报告格式。", parent=win)
+                return
+            win.destroy()
+            self._generate_report(eng, fmts, var_out.get().strip() or "shadowmap_out")
+
+        ctk.CTkButton(win, text="生成", width=110, command=_generate
+                      ).pack(pady=(12, 16))
+
+    def _generate_report(self, eng, fmts, outdir):
+        outdir = os.path.abspath(outdir)
+        eng.args.output_formats = ",".join(fmts)
+        eng.args.out = outdir
+        self._last_out_dir = outdir
+
+        def _job():
+            try:
+                shadowmap.LOG_HOOK = lambda msg, level: self._queue.put(("log", msg, level))
+                files, json_path, md_path = eng.output()
+                self._queue.put(("report_done", (files, json_path, md_path)))
+            except Exception:
+                self._queue.put(("error", traceback.format_exc()))
+
+        self.btn_report.configure(state="disabled")
+        self._append_log("== 生成报告（%s）==" % "+".join(fmts), "#")
+        threading.Thread(target=_job, daemon=True).start()
+
+    def _on_report_done(self, files, json_path, md_path):
+        n = len(files) + (1 if json_path else 0) + (1 if md_path else 0)
+        self._append_log("报告已生成：%d 个文件" % n, "+")
+        if files.get("confirmed"):
+            self._append_log("确认台账：%s" % files["confirmed"], "+")
+        if md_path:
+            self._last_md_path = md_path
+            self._append_log("可读报告：%s" % md_path, "+")
+        self.btn_report.configure(state="normal")
+        if files or json_path or md_path:
+            self.btn_open_out.configure(state="normal")
+        if md_path:
+            self.btn_open_report.configure(state="normal")
+        messagebox.showinfo("完成", "报告已生成（%d 个文件），见「打开输出文件夹」。" % n)
 
     # ---- 打开产物 ----
     def _open_out(self):

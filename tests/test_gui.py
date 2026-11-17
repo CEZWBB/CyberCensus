@@ -59,6 +59,33 @@ class TestParseTargets(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class TestAssetRows(unittest.TestCase):
+    def test_rows_sorted_and_translated(self):
+        import argparse
+        e = gui.shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        a1 = e.add_asset("b.example.com", 443, "https", source="anchor")
+        a1.title = "确认站"
+        a1.beian = "京ICP备12345678号"
+        e.anchor["beian"].add("京ICP备12345678号")
+        a2 = e.add_asset("a.example.com", None, None, source="passive")
+        e.evaluate()
+        rows = gui.asset_rows(e)
+        self.assertEqual(len(rows), 2)
+        # 排序：确认在前
+        self.assertEqual(rows[0][0], "确认")
+        self.assertEqual(rows[0][1], "b.example.com")
+        # 归属说明是白话（含"备案号"字样），不是原始 A| 证据串
+        self.assertIn("备案号", rows[0][5])
+        # tag 映射正确
+        self.assertEqual(rows[0][6], "confirmed")
+        self.assertEqual(rows[1][6], "unknown")
+
+    def test_empty_engine(self):
+        import argparse
+        e = gui.shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        self.assertEqual(gui.asset_rows(e), [])
+
+
 class TestBuildArgs(unittest.TestCase):
     def test_passive_mode(self):
         args = gui.build_args("passive", ["fofa"])

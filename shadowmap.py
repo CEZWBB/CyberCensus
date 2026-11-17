@@ -1929,12 +1929,14 @@ def build_parser():
     return p
 
 
-def run_pipeline(args, names, domains, ips, should_stop=None):
+def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
     """执行完整测绘流水线（CLI 与 GUI 共用）。
 
     should_stop: 可选回调，各阶段之间检查；返回 True 时跳过剩余采集阶段，
     直接对已收集的数据做分级输出（GUI 的"停止并输出"用）。
-    返回 (engine, files, json_path, md_path)。
+    do_output: False 时只做采集+分级不写报告文件（GUI 先在界面里展示结果，
+    报告由用户点"生成报告"按钮时再调 eng.output() 按需导出）。
+    返回 (engine, files, json_path, md_path)；do_output=False 时后三项为空值。
     """
     def _stopped():
         return bool(should_stop and should_stop())
@@ -1983,6 +1985,8 @@ def run_pipeline(args, names, domains, ips, should_stop=None):
     if _stopped():
         log("已请求停止：对已收集的数据做分级输出。", "!")
     eng.evaluate()
+    if not do_output:
+        return eng, {}, "", ""
     files, json_path, md_path = eng.output()
     return eng, files, json_path, md_path
 
