@@ -62,7 +62,7 @@ class TestParseTargets(unittest.TestCase):
 class TestAssetRows(unittest.TestCase):
     def test_rows_sorted_and_translated(self):
         import argparse
-        e = gui.shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e = gui.cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
         a1 = e.add_asset("b.example.com", 443, "https", source="anchor")
         a1.title = "确认站"
         a1.beian = "京ICP备12345678号"
@@ -82,7 +82,7 @@ class TestAssetRows(unittest.TestCase):
 
     def test_empty_engine(self):
         import argparse
-        e = gui.shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e = gui.cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
         self.assertEqual(gui.asset_rows(e), [])
 
 
@@ -127,14 +127,14 @@ class TestBuildArgs(unittest.TestCase):
 
     def test_ports_priority(self):
         args = gui.build_args("standard", [], top=5)
-        self.assertEqual(args.ports_list, list(gui.shadowmap.DEFAULT_PORTS[:5]))
+        self.assertEqual(args.ports_list, list(gui.cybercensus.DEFAULT_PORTS[:5]))
         args = gui.build_args("standard", [], ports="80,443")
         self.assertEqual(args.ports_list, [80, 443])
         args = gui.build_args("standard", [], top=5, ports="8000-8002")
         # 自定义端口优先于 top
         self.assertEqual(args.ports_list, [8000, 8001, 8002])
         args = gui.build_args("standard", [])
-        self.assertEqual(args.ports_list, list(gui.shadowmap.DEFAULT_PORTS))
+        self.assertEqual(args.ports_list, list(gui.cybercensus.DEFAULT_PORTS))
 
 
 if __name__ == "__main__":

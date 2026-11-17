@@ -15,7 +15,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import shadowmap  # noqa: E402
+import cybercensus  # noqa: E402
 import providers as prov  # noqa: E402
 
 
@@ -24,56 +24,56 @@ import providers as prov  # noqa: E402
 # ----------------------------------------------------------------------------
 class TestBeianKey(unittest.TestCase):
     def test_main_key_extraction(self):
-        self.assertEqual(shadowmap._beian_key("京ICP备12345678号-1"), "京ICP备12345678")
-        self.assertEqual(shadowmap._beian_key("京ICP备12345678号"), "京ICP备12345678")
-        self.assertEqual(shadowmap._beian_key("粤ICP备20000001号-15"), "粤ICP备20000001")
+        self.assertEqual(cybercensus._beian_key("京ICP备12345678号-1"), "京ICP备12345678")
+        self.assertEqual(cybercensus._beian_key("京ICP备12345678号"), "京ICP备12345678")
+        self.assertEqual(cybercensus._beian_key("粤ICP备20000001号-15"), "粤ICP备20000001")
 
     def test_fullwidth_normalization(self):
         # 全角 ＩＣＰ 与全角数字应被归一化
-        self.assertEqual(shadowmap._beian_key("京ＩＣＰ备１２３４号"), "京ICP备1234")
+        self.assertEqual(cybercensus._beian_key("京ＩＣＰ备１２３４号"), "京ICP备1234")
 
     def test_garbage_returns_empty(self):
-        self.assertEqual(shadowmap._beian_key("12345"), "")
-        self.assertEqual(shadowmap._beian_key("1.2.3.4"), "")
-        self.assertEqual(shadowmap._beian_key("某某公司"), "")
-        self.assertEqual(shadowmap._beian_key(""), "")
-        self.assertEqual(shadowmap._beian_key(None), "")
+        self.assertEqual(cybercensus._beian_key("12345"), "")
+        self.assertEqual(cybercensus._beian_key("1.2.3.4"), "")
+        self.assertEqual(cybercensus._beian_key("某某公司"), "")
+        self.assertEqual(cybercensus._beian_key(""), "")
+        self.assertEqual(cybercensus._beian_key(None), "")
 
     def test_different_subjects_do_not_match(self):
         # 主号不同 = 不同主体，绝不互认
-        self.assertNotEqual(shadowmap._beian_key("京ICP备1234号"),
-                            shadowmap._beian_key("京ICP备12345号"))
-        self.assertEqual(shadowmap._beian_key("京ICP备12345678号-1"),
-                         shadowmap._beian_key("京ICP备12345678号-10"))
+        self.assertNotEqual(cybercensus._beian_key("京ICP备1234号"),
+                            cybercensus._beian_key("京ICP备12345号"))
+        self.assertEqual(cybercensus._beian_key("京ICP备12345678号-1"),
+                         cybercensus._beian_key("京ICP备12345678号-10"))
 
 
 class TestOrgMatch(unittest.TestCase):
     def test_subordinate_org_matches(self):
         # 真实下属机构：短边 ≥6 字符的包含应命中
-        self.assertTrue(shadowmap._org_match("某某市数据局信息中心", "某某市数据局"))
+        self.assertTrue(cybercensus._org_match("某某市数据局信息中心", "某某市数据局"))
 
     def test_short_name_no_match(self):
         # 过短名的裸包含是误报源，不应命中
-        self.assertFalse(shadowmap._org_match("某某市", "某某市人民政府"))
+        self.assertFalse(cybercensus._org_match("某某市", "某某市人民政府"))
 
     def test_normalized_equality(self):
         # 全角/空白差异归一后相等
-        self.assertTrue(shadowmap._org_match("Ａｌｉｂａｂａ　Ｇｒｏｕｐ", "alibaba group"))
-        self.assertTrue(shadowmap._org_match("某某市人民政府 ", "某某市人民政府"))
+        self.assertTrue(cybercensus._org_match("Ａｌｉｂａｂａ　Ｇｒｏｕｐ", "alibaba group"))
+        self.assertTrue(cybercensus._org_match("某某市人民政府 ", "某某市人民政府"))
 
     def test_unrelated_no_match(self):
-        self.assertFalse(shadowmap._org_match("China Telecom", "某某市人民政府"))
-        self.assertFalse(shadowmap._org_match("", "x"))
-        self.assertFalse(shadowmap._org_match(None, "x"))
+        self.assertFalse(cybercensus._org_match("China Telecom", "某某市人民政府"))
+        self.assertFalse(cybercensus._org_match("", "x"))
+        self.assertFalse(cybercensus._org_match(None, "x"))
 
     def test_different_hospitals_never_match(self):
         # 同城不同医院（"东莞市人民医院" vs "东莞市莞城医院"）绝不互认——
         # 这正是匹配保持严格子串/相等而不引入模糊相似度的原因
-        self.assertFalse(shadowmap._org_match("东莞市人民医院", "东莞市莞城医院"))
+        self.assertFalse(cybercensus._org_match("东莞市人民医院", "东莞市莞城医院"))
         # 中间插入字样的别名（"莞城医院" vs "莞城人民医院"）同样不互认，
         # 只有完整别名的包含/相等才命中
-        self.assertFalse(shadowmap._org_match("莞城医院", "莞城人民医院"))
-        self.assertTrue(shadowmap._org_match("莞城人民医院", "东莞市莞城人民医院"))
+        self.assertFalse(cybercensus._org_match("莞城医院", "莞城人民医院"))
+        self.assertTrue(cybercensus._org_match("莞城人民医院", "东莞市莞城人民医院"))
 
 
 # ----------------------------------------------------------------------------
@@ -82,11 +82,11 @@ class TestOrgMatch(unittest.TestCase):
 class TestWebPorts(unittest.TestCase):
     def test_new_ports_covered(self):
         for p in (5000, 7001, 7002, 888):
-            self.assertTrue(shadowmap.is_web_port(p), "port %d 应为 web 端口" % p)
+            self.assertTrue(cybercensus.is_web_port(p), "port %d 应为 web 端口" % p)
 
     def test_non_web_ports(self):
         for p in (22, 3306, 6379, 3389):
-            self.assertFalse(shadowmap.is_web_port(p))
+            self.assertFalse(cybercensus.is_web_port(p))
 
 
 # ----------------------------------------------------------------------------
@@ -165,7 +165,7 @@ import argparse  # noqa: E402
 
 def _engine():
     args = argparse.Namespace(beian="", threads=10, timeout=5)
-    return shadowmap.Engine(args)
+    return cybercensus.Engine(args)
 
 
 class TestEvaluate(unittest.TestCase):
@@ -259,31 +259,31 @@ class TestMergeProviders(unittest.TestCase):
 # ----------------------------------------------------------------------------
 class TestClassifyTarget(unittest.TestCase):
     def test_kinds(self):
-        self.assertEqual(shadowmap.classify_target("1.2.3.4"), "ip")
-        self.assertEqual(shadowmap.classify_target("1.2.3.0/24"), "cidr")
-        self.assertEqual(shadowmap.classify_target("2600::/64"), "cidr")
-        self.assertEqual(shadowmap.classify_target("example.com"), "domain")
-        self.assertEqual(shadowmap.classify_target("某某市大数据局"), "name")
-        self.assertEqual(shadowmap.classify_target("abc/24"), "name")
+        self.assertEqual(cybercensus.classify_target("1.2.3.4"), "ip")
+        self.assertEqual(cybercensus.classify_target("1.2.3.0/24"), "cidr")
+        self.assertEqual(cybercensus.classify_target("2600::/64"), "cidr")
+        self.assertEqual(cybercensus.classify_target("example.com"), "domain")
+        self.assertEqual(cybercensus.classify_target("某某市大数据局"), "name")
+        self.assertEqual(cybercensus.classify_target("abc/24"), "name")
 
     def test_add_ip_target(self):
         ips = set()
-        self.assertIsNone(shadowmap._add_ip_target(ips, "1.2.3.4"))
+        self.assertIsNone(cybercensus._add_ip_target(ips, "1.2.3.4"))
         self.assertEqual(ips, {"1.2.3.4"})
-        self.assertIsNone(shadowmap._add_ip_target(ips, ""))
+        self.assertIsNone(cybercensus._add_ip_target(ips, ""))
         ips = set()
-        self.assertIsNone(shadowmap._add_ip_target(ips, "1.2.3.0/24"))
+        self.assertIsNone(cybercensus._add_ip_target(ips, "1.2.3.0/24"))
         self.assertEqual(len(ips), 254)
 
     def test_oversized_cidr_rejected(self):
-        err = shadowmap._add_ip_target(set(), "1.2.3.0/16")
+        err = cybercensus._add_ip_target(set(), "1.2.3.0/16")
         self.assertIsNotNone(err)
         self.assertIn("过大", err)
-        err = shadowmap._add_ip_target(set(), "2600::/64")
+        err = cybercensus._add_ip_target(set(), "2600::/64")
         self.assertIsNotNone(err)
 
     def test_garbage_cidr_error(self):
-        err = shadowmap._add_ip_target(set(), "garbage/24")
+        err = cybercensus._add_ip_target(set(), "garbage/24")
         self.assertIsNotNone(err)
 
 
@@ -378,11 +378,11 @@ class TestScanConcurrency(unittest.TestCase):
                 state["cur"] -= 1
             return port == 80
 
-        orig = shadowmap.tcp_open
-        shadowmap.tcp_open = fake_tcp_open
-        self.addCleanup(shadowmap.__setattr__, "tcp_open", orig)
+        orig = cybercensus.tcp_open
+        cybercensus.tcp_open = fake_tcp_open
+        self.addCleanup(cybercensus.__setattr__, "tcp_open", orig)
 
-        e = shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5,
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5,
                                                 scan_timeout=1.0))
         # 直接调用 scan_active 的核心段不可行（涉及 DNS/资产），改为验证等价结构：
         # 模拟 scan_active 的扁平 executor 实现
@@ -443,30 +443,30 @@ class TestLogHook(unittest.TestCase):
         import io
         import contextlib
         captured = []
-        orig = shadowmap.LOG_HOOK
-        shadowmap.LOG_HOOK = lambda msg, level: captured.append((msg, level))
+        orig = cybercensus.LOG_HOOK
+        cybercensus.LOG_HOOK = lambda msg, level: captured.append((msg, level))
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                shadowmap.log("hello", "!")
-                shadowmap.log("quiet-world", "#")
+                cybercensus.log("hello", "!")
+                cybercensus.log("quiet-world", "#")
             self.assertEqual(captured, [("hello", "!"), ("quiet-world", "#")])
             self.assertEqual(buf.getvalue(), "")   # 设置钩子后不再打印
         finally:
-            shadowmap.LOG_HOOK = orig
+            cybercensus.LOG_HOOK = orig
 
     def test_no_hook_prints_normally(self):
         import io
         import contextlib
-        orig = shadowmap.LOG_HOOK
-        shadowmap.LOG_HOOK = None
+        orig = cybercensus.LOG_HOOK
+        cybercensus.LOG_HOOK = None
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                shadowmap.log("plain", "*")
+                cybercensus.log("plain", "*")
             self.assertIn("plain", buf.getvalue())
         finally:
-            shadowmap.LOG_HOOK = orig
+            cybercensus.LOG_HOOK = orig
 
 
 # ----------------------------------------------------------------------------
@@ -474,9 +474,9 @@ class TestLogHook(unittest.TestCase):
 # ----------------------------------------------------------------------------
 class TestDiscoverDomainsFromSearch(unittest.TestCase):
     def _patch_lookup(self, text, hosts):
-        orig = shadowmap.search_engine_lookup
-        shadowmap.search_engine_lookup = lambda name, timeout=15: (text, hosts)
-        self.addCleanup(shadowmap.__setattr__, "search_engine_lookup", orig)
+        orig = cybercensus.search_engine_lookup
+        cybercensus.search_engine_lookup = lambda name, timeout=15: (text, hosts)
+        self.addCleanup(cybercensus.__setattr__, "search_engine_lookup", orig)
 
     def test_junk_filtered_and_ranked(self):
         self._patch_lookup(
@@ -484,7 +484,7 @@ class TestDiscoverDomainsFromSearch(unittest.TestCase):
             "求医网提示 网址 www.dggcyy.com，粤ICP备13075739号。"
             "更多参考 www.dggcyy.com。",
             ["www.qiuyi.cn", "www.bohe.cn", "www.dggcyy.cn"])
-        out = shadowmap.discover_domains_from_search("莞城人民医院")
+        out = cybercensus.discover_domains_from_search("莞城人民医院")
         hosts = [h for h, s in out]
         # 目录站（qiuyi/bohe）被黑名单排除
         self.assertNotIn("www.qiuyi.cn", hosts)
@@ -497,26 +497,26 @@ class TestDiscoverDomainsFromSearch(unittest.TestCase):
 
     def test_empty_lookup(self):
         self._patch_lookup("", [])
-        self.assertEqual(shadowmap.discover_domains_from_search("x"), [])
+        self.assertEqual(cybercensus.discover_domains_from_search("x"), [])
 
     def test_max_candidates_capped(self):
         self._patch_lookup(
             " ".join("a%d.example.com" % i for i in range(20)), [])
-        out = shadowmap.discover_domains_from_search("x")
+        out = cybercensus.discover_domains_from_search("x")
         self.assertLessEqual(len(out), 5)
 
 
 class TestVerifyCandidateDomain(unittest.TestCase):
     def _engine(self):
-        e = shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
         e.names = ["莞城人民医院"]
         return e
 
     def _patch_probe(self, title):
-        orig = shadowmap.http_probe
-        shadowmap.http_probe = lambda host, port, scheme, timeout=8: {
+        orig = cybercensus.http_probe
+        cybercensus.http_probe = lambda host, port, scheme, timeout=8: {
             "status": 200, "title": title}
-        self.addCleanup(shadowmap.__setattr__, "http_probe", orig)
+        self.addCleanup(cybercensus.__setattr__, "http_probe", orig)
 
     def test_title_match_verifies(self):
         e = self._engine()
@@ -527,28 +527,28 @@ class TestVerifyCandidateDomain(unittest.TestCase):
     def test_unrelated_title_rejected(self):
         e = self._engine()
         self._patch_probe("东莞市人民政府门户网站")
-        orig = shadowmap.tls_cert_info
-        shadowmap.tls_cert_info = lambda h, p, timeout=8: {}
-        self.addCleanup(shadowmap.__setattr__, "tls_cert_info", orig)
+        orig = cybercensus.tls_cert_info
+        cybercensus.tls_cert_info = lambda h, p, timeout=8: {}
+        self.addCleanup(cybercensus.__setattr__, "tls_cert_info", orig)
         self.assertFalse(e._verify_candidate_domain("莞城人民医院", "www.dg.gov.cn"))
         self.assertNotIn("www.dg.gov.cn", e.domains)
 
     def test_cert_org_verifies(self):
         e = self._engine()
         self._patch_probe("首页")   # 标题不含主体名
-        orig = shadowmap.tls_cert_info
-        shadowmap.tls_cert_info = lambda h, p, timeout=8: {"org": "东莞市莞城人民医院"}
-        self.addCleanup(shadowmap.__setattr__, "tls_cert_info", orig)
+        orig = cybercensus.tls_cert_info
+        cybercensus.tls_cert_info = lambda h, p, timeout=8: {"org": "东莞市莞城人民医院"}
+        self.addCleanup(cybercensus.__setattr__, "tls_cert_info", orig)
         self.assertTrue(e._verify_candidate_domain("莞城人民医院", "www.dggcyy.cn"))
 
     def test_discover_passive_mode_weak_anchors(self):
         """纯被动模式：搜索引擎候选域名作未验证弱锚点加入（不探测目标）。"""
         e = self._engine()
         e.args.no_probe = True
-        orig = shadowmap.discover_domains_from_search
-        shadowmap.discover_domains_from_search = lambda n, max_candidates=5: [
+        orig = cybercensus.discover_domains_from_search
+        cybercensus.discover_domains_from_search = lambda n, max_candidates=5: [
             ("www.x.com", 3), ("www.y.com", 2)]
-        self.addCleanup(shadowmap.__setattr__, "discover_domains_from_search", orig)
+        self.addCleanup(cybercensus.__setattr__, "discover_domains_from_search", orig)
         e.discover_names_to_domains()
         # 候选根域名进入 self.domains（触发本地被动枚举）且标记为弱锚点
         self.assertIn("x.com", e.domains)
@@ -567,9 +567,9 @@ class TestVerifyCandidateDomain(unittest.TestCase):
         e = self._engine()
         e.domains = {"user-given.example.com"}
         called = []
-        orig = shadowmap.discover_domains_from_search
-        shadowmap.discover_domains_from_search = lambda n: called.append(n) or []
-        self.addCleanup(shadowmap.__setattr__, "discover_domains_from_search", orig)
+        orig = cybercensus.discover_domains_from_search
+        cybercensus.discover_domains_from_search = lambda n: called.append(n) or []
+        self.addCleanup(cybercensus.__setattr__, "discover_domains_from_search", orig)
         e.discover_names_to_domains()
         self.assertEqual(called, [])   # 已有域名输入不自举
 
@@ -579,11 +579,11 @@ class TestVerifyCandidateDomain(unittest.TestCase):
 # ----------------------------------------------------------------------------
 class TestPlainEvidence(unittest.TestCase):
     def test_translates_known_prefixes(self):
-        out = shadowmap.plain_evidence(["A|页面备案号一致:京ICP备12345678号-1"])
+        out = cybercensus.plain_evidence(["A|页面备案号一致:京ICP备12345678号-1"])
         self.assertIn("网站页脚的ICP备案号与目标单位备案号一致", out)
 
     def test_dedup_and_join(self):
-        out = shadowmap.plain_evidence(
+        out = cybercensus.plain_evidence(
             ["A|页面备案号一致:X", "A|证书O=一致:Y", "A|平台icp命中"])
         self.assertIn("；", out)
         self.assertEqual(out.count("备案号"), 2)   # 两条不同备案证据都保留
@@ -591,16 +591,16 @@ class TestPlainEvidence(unittest.TestCase):
     def test_max_items_capped(self):
         evs = ["A|页面备案号一致:X", "A|证书O=一致:Y", "A|主域名子域:z.com",
                "A|平台cert命中", "A|平台icp命中"]
-        out = shadowmap.plain_evidence(evs, max_items=3)
+        out = cybercensus.plain_evidence(evs, max_items=3)
         self.assertTrue(out.endswith("等"))
         self.assertEqual(out.count("；"), 3)   # 3条 + "等" 共3个分号
 
     def test_unknown_passthrough(self):
-        out = shadowmap.plain_evidence(["X|未来的证据类型"])
+        out = cybercensus.plain_evidence(["X|未来的证据类型"])
         self.assertEqual(out, "X|未来的证据类型")
 
     def test_empty(self):
-        self.assertEqual(shadowmap.plain_evidence([]), "")
+        self.assertEqual(cybercensus.plain_evidence([]), "")
 
 
 # ----------------------------------------------------------------------------
@@ -608,7 +608,7 @@ class TestPlainEvidence(unittest.TestCase):
 # ----------------------------------------------------------------------------
 class TestOutputPlaceholderMerge(unittest.TestCase):
     def test_placeholder_merged_into_ported_asset(self):
-        e = shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
         # 被动阶段的 host-only 占位（无端口无 scheme）
         ph = e.add_asset("a.example.com", None, None, source="passive")
         ph.ip = "1.1.1.1"
@@ -631,7 +631,7 @@ class TestOutputPlaceholderMerge(unittest.TestCase):
 
     def test_standalone_placeholder_kept(self):
         # 没有同主机带端口资产时，占位资产保留（不能丢掉未探测到的线索）
-        e = shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
         e.add_asset("b.example.com", None, None, source="passive")
         e.args.out = os.path.join(tempfile.gettempdir(), "asm_test_out2")
         e.args.active = False
@@ -648,7 +648,7 @@ class TestOutputPlaceholderMerge(unittest.TestCase):
 # ----------------------------------------------------------------------------
 class TestOutputFormats(unittest.TestCase):
     def _run_output(self, fmt):
-        e = shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
         a = e.add_asset("a.example.com", 443, "https", source="anchor")
         a.title = "测试站"
         outdir = tempfile.mkdtemp(prefix="sm_fmt_")

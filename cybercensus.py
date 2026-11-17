@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-shadowmap.py —— ShadowMap：单位名称 / 域名 / IP 的互联网暴露面测绘工具（低误报版）
+cybercensus.py —— CyberCensus：单位名称 / 域名 / IP 的互联网暴露面测绘工具（低误报版）
 
 设计原则（对应《单位名称暴露面全量测绘方法》）：
   1. 名称/域名/IP 只是入口，真正的"证据锚点"是：
@@ -11,11 +11,11 @@ shadowmap.py —— ShadowMap：单位名称 / 域名 / IP 的互联网暴露面
   4. 结果按 A/B/C 证据分级自动给出 确认 / 疑似 / 存疑。
 
 用法示例：
-  python shadowmap.py -n "某某市人民政府" -d xx.gov.cn
-  python shadowmap.py -d example.com
-  python shadowmap.py --ip 1.2.3.4
-  python shadowmap.py -d example.com --active --top 200
-  python shadowmap.py -d example.com --active --cscan
+  python cybercensus.py -n "某某市人民政府" -d xx.gov.cn
+  python cybercensus.py -d example.com
+  python cybercensus.py --ip 1.2.3.4
+  python cybercensus.py -d example.com --active --top 200
+  python cybercensus.py -d example.com --active --cscan
 
 依赖（可选，缺失会自动降级）：
   pip install dnspython cryptography
@@ -1532,7 +1532,7 @@ class Engine(object):
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = os.path.join(outdir, "shadowmap_%s" % ts)
+        base = os.path.join(outdir, "cybercensus_%s" % ts)
 
         # 合并"仅主机"占位资产（被动阶段 host-only 条目）到同主机的带端口资产：
         # 否则报告里同一主机会出现一行"无端口无标题"的重复行，新手看着像脏数据。
@@ -1638,7 +1638,7 @@ class Engine(object):
 
     def _report(self, rows, groups, ts):
         L = []
-        L.append("# ShadowMap 互联网暴露面测绘报告\n")
+        L.append("# CyberCensus 互联网暴露面测绘报告\n")
         L.append("- 生成时间：%s" % ts)
 
         # ---- 新手导读：三份清单怎么用 ----
@@ -1878,11 +1878,11 @@ def build_parser():
         description="单位名称 / 域名 / IP 的互联网暴露面测绘工具（默认被动，主动需 --active）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""示例:
-  python shadowmap.py -n "某某市人民政府" -d xx.gov.cn
-  python shadowmap.py -d example.com
-  python shadowmap.py --ip 1.2.3.4
-  python shadowmap.py -d example.com --active --top 200
-  python shadowmap.py -d example.com --active --cscan
+  python cybercensus.py -n "某某市人民政府" -d xx.gov.cn
+  python cybercensus.py -d example.com
+  python cybercensus.py --ip 1.2.3.4
+  python cybercensus.py -d example.com --active --top 200
+  python cybercensus.py -d example.com --active --cscan
 """)
     p.add_argument("target", nargs="?", help="自动识别：域名 / IP / 单位名称")
     p.add_argument("-n", "--name", action="append", default=[], help="单位名称（可多次）")
@@ -1898,7 +1898,7 @@ def build_parser():
     p.add_argument("--timeout", type=float, default=10, help="超时秒数（默认10）")
     p.add_argument("--scan-timeout", type=float, default=2.5, dest="scan_timeout",
                    help="TCP 端口扫描连接超时秒数（默认2.5；与 --timeout 的 HTTP 超时独立）")
-    p.add_argument("--out", default="shadowmap_out", help="输出目录")
+    p.add_argument("--out", default="cybercensus_out", help="输出目录")
     p.add_argument("--formats", default="md,csv,json", dest="output_formats",
                    help="输出哪些格式：md / csv / json，逗号分隔（默认全出）")
     p.add_argument("--no-probe", action="store_true", help="完全不触碰目标（纯第三方数据）")

@@ -14,7 +14,7 @@ providers.py —— 多平台网络空间测绘聚合适配层
      尽量不用 title/body 这类宽泛关键词，从源头降低误报。
   2. 每条结果都带上 match_kind（命中类型），供上层做证据分级。
   3. 任一平台失败不影响其它平台。
-  4. 只做"取数 + 归一化"，去重/评分/剔除由上层 shadowmap.py 完成。
+  4. 只做"取数 + 归一化"，去重/评分/剔除由上层 cybercensus.py 完成。
 
 配置（优先级：环境变量 > config.json）：
   FOFA_EMAIL / FOFA_KEY
