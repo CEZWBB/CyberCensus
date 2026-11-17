@@ -26,7 +26,12 @@ import sys
 import threading
 import traceback
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# PyInstaller 单文件模式下 __file__ 指向临时解压目录（_MEIPASS），
+# config.json / 输出目录必须定位到 exe 所在目录
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
 import shadowmap                # noqa: E402
