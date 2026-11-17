@@ -29,7 +29,7 @@ import traceback
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-import asm_recon                # noqa: E402
+import shadowmap                # noqa: E402
 import providers as prov_layer  # noqa: E402
 
 try:
@@ -47,7 +47,7 @@ except ImportError:
 
 from tkinter import messagebox, filedialog  # noqa: E402
 
-APP_TITLE = "ASM 测绘 · 互联网暴露面测绘工具"
+APP_TITLE = "ShadowMap · 互联网暴露面测绘工具"
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 # 界面模式选项 -> 流水线模式
@@ -89,11 +89,11 @@ def parse_targets(text):
     names, domains, ips, errors = [], set(), set(), []
     tokens = [t for t in re.split(r"[,，;；\s]+", (text or "").strip()) if t]
     for t in tokens:
-        kind = asm_recon.classify_target(t)
+        kind = shadowmap.classify_target(t)
         if kind == "ip":
             ips.add(t)
         elif kind == "cidr":
-            err = asm_recon._add_ip_target(ips, t)
+            err = shadowmap._add_ip_target(ips, t)
             if err:
                 errors.append(err)
         elif kind == "domain":
@@ -105,7 +105,7 @@ def parse_targets(text):
 
 def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
-               out="asm_out", config=CONFIG_PATH, debug_provider=False):
+               out="shadowmap_out", config=CONFIG_PATH, debug_provider=False):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
@@ -139,13 +139,13 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
     if ports:
-        args.ports_list = asm_recon.parse_ports(ports)
+        args.ports_list = shadowmap.parse_ports(ports)
     elif args.top > 0:
-        args.ports_list = list(asm_recon.DEFAULT_PORTS[:args.top])
+        args.ports_list = list(shadowmap.DEFAULT_PORTS[:args.top])
     else:
-        args.ports_list = list(asm_recon.DEFAULT_PORTS)
+        args.ports_list = list(shadowmap.DEFAULT_PORTS)
     if not args.ports_list:
-        args.ports_list = list(asm_recon.DEFAULT_PORTS)
+        args.ports_list = list(shadowmap.DEFAULT_PORTS)
     return args
 
 
@@ -194,7 +194,7 @@ class App(ctk.CTk):
         sb.grid_rowconfigure(10, weight=1)   # 弹性空隙
         self._sidebar = sb
 
-        ctk.CTkLabel(sb, text="ASM 测绘", font=ctk.CTkFont(size=24, weight="bold")
+        ctk.CTkLabel(sb, text="ShadowMap", font=ctk.CTkFont(size=24, weight="bold")
                      ).grid(row=0, column=0, sticky="w", padx=22, pady=(24, 0))
         ctk.CTkLabel(sb, text="互联网暴露面测绘 · 低误报",
                      text_color=GRAY).grid(row=1, column=0, sticky="w", padx=22)
@@ -368,7 +368,7 @@ class App(ctk.CTk):
                       ).grid(row=1, column=5, sticky="w", padx=(8, 14))
 
         ctk.CTkLabel(f, text="输出目录").grid(row=2, column=0, sticky="e", padx=(14, 4), pady=6)
-        self.var_out = ctk.StringVar(value="asm_out")
+        self.var_out = ctk.StringVar(value="shadowmap_out")
         ctk.CTkEntry(f, textvariable=self.var_out).grid(row=2, column=1, columnspan=3,
                                                         sticky="we", padx=(0, 4))
         ctk.CTkButton(f, text="浏览…", width=70, command=self._browse_out
@@ -525,7 +525,7 @@ class App(ctk.CTk):
             if not messagebox.askyesno("全端口确认", "全端口 1-65535 非常慢，确定继续？"):
                 return
         platforms = [n for n, v in self.var_platforms.items() if v.get()]
-        outdir = os.path.abspath(self.var_out.get().strip() or "asm_out")
+        outdir = os.path.abspath(self.var_out.get().strip() or "shadowmap_out")
         args = build_args(
             mode, platforms,
             threads=_to_int(self.cmb_threads.get(), 20),
@@ -555,7 +555,7 @@ class App(ctk.CTk):
         self._append_log("目标已提交，开始测绘…", "#")
         self.bar.start()
 
-        asm_recon.LOG_HOOK = lambda msg, level: self._queue.put(("log", msg, level))
+        shadowmap.LOG_HOOK = lambda msg, level: self._queue.put(("log", msg, level))
         self._worker = threading.Thread(target=self._run,
                                         args=(args, names, domains, ips),
                                         daemon=True)
@@ -563,7 +563,7 @@ class App(ctk.CTk):
 
     def _run(self, args, names, domains, ips):
         try:
-            eng, files, json_path, md_path = asm_recon.run_pipeline(
+            eng, files, json_path, md_path = shadowmap.run_pipeline(
                 args, names, domains, ips,
                 should_stop=self._stop_flag.is_set)
             self._queue.put(("done", (eng, files, json_path, md_path)))
@@ -652,7 +652,7 @@ class App(ctk.CTk):
         if self._worker and self._worker.is_alive():
             if not messagebox.askyesno(APP_TITLE, "测绘仍在运行，确定退出吗？"):
                 return
-        asm_recon.LOG_HOOK = None
+        shadowmap.LOG_HOOK = None
         self._stop_flag.set()
         self.destroy()
 

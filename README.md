@@ -1,4 +1,4 @@
-# asm_recon —— 单位名称 / 域名 / IP 的互联网暴露面测绘工具
+# ShadowMap —— 单位名称 / 域名 / IP 的互联网暴露面测绘工具
 
 > 给一个**单位名称、域名或 IP**，自动找出该单位暴露在公网上的资产，并按证据强度分成 **确认 / 疑似 / 剔除** 三份台账——**误报不进确认清单**。
 
@@ -58,14 +58,14 @@ pyinstaller --onefile --windowed --collect-all customtkinter asm_gui.pyw
 asm-tool\
 ├─ asm_gui.pyw           图形界面（双击运行，无控制台窗口）
 ├─ 启动界面.bat           界面一键启动器
-├─ asm_recon.py           主程序（采集 / 聚合 / 评分 / 出报告，CLI 与界面共用流水线）
+├─ shadowmap.py           主程序（采集 / 聚合 / 评分 / 出报告，CLI 与界面共用流水线）
 ├─ providers.py           四平台 API 适配层
 ├─ config.example.json    平台 Key 配置模板（复制为 config.json 使用）
 ├─ requirements.txt       可选依赖
 ├─ run.bat                启动器（无参数=打开界面；带参数=命令行模式，如 run.bat -d xx.gov.cn）
 ├─ docs\                  方法论文档
 ├─ tests\                 回归测试（python -m unittest discover tests）
-└─ asm_out\               默认输出目录（运行后生成）
+└─ shadowmap_out\               默认输出目录（运行后生成）
 ```
 
 ---
@@ -110,7 +110,7 @@ set DAYDAYMAP_KEY=你的DayDayMap Key
 只启用部分平台：
 
 ```bat
-python asm_recon.py -d xx.gov.cn --providers fofa hunter
+python shadowmap.py -d xx.gov.cn --providers fofa hunter
 ```
 
 可选值：`fofa` / `zerozone` / `hunter` / `daydaymap`（可多次）。`--no-providers` 表示完全不查平台。
@@ -121,31 +121,31 @@ python asm_recon.py -d xx.gov.cn --providers fofa hunter
 
 ```bat
 :: 1) 最常用：已知主域名（名称可从 ICP / 天眼查先查出来）
-python asm_recon.py -d xx.gov.cn
+python shadowmap.py -d xx.gov.cn
 
 :: 2) 名称 + 主域名（名称用于证书 O= 反查，效果最好）
-python asm_recon.py -n "某某市人民政府" -d xx.gov.cn
+python shadowmap.py -n "某某市人民政府" -d xx.gov.cn
 
 :: 3) 只给单位名称（无需任何 Key：搜索引擎自举官网 → 标题/证书互证 → 建锚点）
-python asm_recon.py -n "某某市大数据发展中心"
+python shadowmap.py -n "某某市大数据发展中心"
 
 :: 4) 只给 IP（也支持 CIDR，如 1.2.3.0/24，需 ≥/24）
-python asm_recon.py --ip 1.2.3.4
+python shadowmap.py --ip 1.2.3.4
 
 :: 5) 纯第三方数据，完全不触碰目标（最保守）
-python asm_recon.py -d xx.gov.cn --no-probe
+python shadowmap.py -d xx.gov.cn --no-probe
 
 :: 6) 被动 + 对疑似资产做一次 HTTP 复核（会访问目标，注意授权）
-python asm_recon.py -d xx.gov.cn --verify --verify-limit 50
+python shadowmap.py -d xx.gov.cn --verify --verify-limit 50
 
 :: 7) 主动扫描（端口 + Web 指纹，需书面授权）
-python asm_recon.py -d xx.gov.cn --active --top 100
+python shadowmap.py -d xx.gov.cn --active --top 100
 
 :: 8) 主动 + C 段扩展（量可能很大）
-python asm_recon.py --ip 1.2.3.4 --active --cscan --top 50
+python shadowmap.py --ip 1.2.3.4 --active --cscan --top 50
 
 :: 9) 只看某个平台、少翻页、少配额
-python asm_recon.py -d xx.gov.cn --providers zerozone --provider-pages 1
+python shadowmap.py -d xx.gov.cn --providers zerozone --provider-pages 1
 ```
 
 Windows 也可以直接：
@@ -186,7 +186,7 @@ run.bat -d xx.gov.cn
 | `--threads` | 并发数，默认 20 |
 | `--timeout` | HTTP/TLS 探测超时秒数，默认 10 |
 | `--scan-timeout` | TCP 端口扫描连接超时秒数，默认 2.5（与 `--timeout` 独立） |
-| `--out` | 输出目录，默认 `asm_out` |
+| `--out` | 输出目录，默认 `shadowmap_out` |
 | `--yes` | 跳过主动扫描的授权确认 |
 | `--quiet` | 少输出 |
 
@@ -279,12 +279,12 @@ run.bat -d xx.gov.cn
 
 | 文件 | 用途 |
 |------|------|
-| `asm_时间戳_confirmed.csv` | **确认资产台账**，可直接交付 / 入 Excel |
-| `asm_时间戳_suspect.csv` | 疑似资产，建议人工访问核实 |
-| `asm_时间戳_rejected.csv` | 已剔除资产 + 剔除原因（含第三方云/CDN） |
-| `asm_时间戳_all.csv` | 全量结果（排查用） |
-| `asm_时间戳.json` | 完整结构化数据（锚点、IP 归属、平台统计、每条证据） |
-| `asm_时间戳.md` | 可读报告（平台取数统计、平台交叉分析、三类清单、判定规则） |
+| `shadowmap_时间戳_confirmed.csv` | **确认资产台账**，可直接交付 / 入 Excel |
+| `shadowmap_时间戳_suspect.csv` | 疑似资产，建议人工访问核实 |
+| `shadowmap_时间戳_rejected.csv` | 已剔除资产 + 剔除原因（含第三方云/CDN） |
+| `shadowmap_时间戳_all.csv` | 全量结果（排查用） |
+| `shadowmap_时间戳.json` | 完整结构化数据（锚点、IP 归属、平台统计、每条证据） |
+| `shadowmap_时间戳.md` | 可读报告（平台取数统计、平台交叉分析、三类清单、判定规则） |
 
 CSV 字段（最后一列 `plain` 是证据的白话翻译，方便不看技术细节的人理解归属依据）：
 

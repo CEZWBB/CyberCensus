@@ -10,9 +10,9 @@ if "%~1"=="" (
 )
 
 chcp 65001 >nul
-py -3.11 asm_recon.py %*
+py -3.11 shadowmap.py %*
 if errorlevel 9009 (
-    python asm_recon.py %*
+    python shadowmap.py %*
 )
 
 echo.
