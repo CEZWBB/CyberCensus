@@ -90,6 +90,14 @@ class TestBuildArgs(unittest.TestCase):
         self.assertTrue(args.no_providers)
         self.assertIsNone(args.providers)
 
+    def test_output_formats(self):
+        args = gui.build_args("standard", [])
+        self.assertEqual(args.output_formats, "md,csv,json")
+        args = gui.build_args("standard", [], formats=["md"])
+        self.assertEqual(args.output_formats, "md")
+        args = gui.build_args("standard", [], formats=["md", "csv"])
+        self.assertEqual(args.output_formats, "md,csv")
+
     def test_ports_priority(self):
         args = gui.build_args("standard", [], top=5)
         self.assertEqual(args.ports_list, list(gui.shadowmap.DEFAULT_PORTS[:5]))

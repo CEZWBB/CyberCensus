@@ -8,6 +8,7 @@ test_fixes.py —— P0-P2 整改的回归测试（纯标准库，不联网、�
 """
 
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -540,15 +541,27 @@ class TestVerifyCandidateDomain(unittest.TestCase):
         self.addCleanup(shadowmap.__setattr__, "tls_cert_info", orig)
         self.assertTrue(e._verify_candidate_domain("莞城人民医院", "www.dggcyy.cn"))
 
-    def test_discover_skipped_without_probe(self):
+    def test_discover_passive_mode_weak_anchors(self):
+        """纯被动模式：搜索引擎候选域名作未验证弱锚点加入（不探测目标）。"""
         e = self._engine()
         e.args.no_probe = True
-        called = []
         orig = shadowmap.discover_domains_from_search
-        shadowmap.discover_domains_from_search = lambda n: called.append(n) or []
+        shadowmap.discover_domains_from_search = lambda n, max_candidates=5: [
+            ("www.x.com", 3), ("www.y.com", 2)]
         self.addCleanup(shadowmap.__setattr__, "discover_domains_from_search", orig)
         e.discover_names_to_domains()
-        self.assertEqual(called, [])   # 纯被动模式直接跳过
+        # 候选根域名进入 self.domains（触发本地被动枚举）且标记为弱锚点
+        self.assertIn("x.com", e.domains)
+        self.assertIn("y.com", e.domains)
+        self.assertIn("x.com", e.anchor["weak_domains"])
+
+    def test_verify_adds_root_domain(self):
+        """验证通过的主机名，其根域名一并入锚点（子域枚举按根域查更全）。"""
+        e = self._engine()
+        self._patch_probe("东莞市莞城人民医院官方网站")
+        self.assertTrue(e._verify_candidate_domain("莞城人民医院", "www.x.com.cn"))
+        self.assertIn("www.x.com.cn", e.domains)
+        self.assertIn("x.com.cn", e.domains)
 
     def test_discover_skipped_when_domains_exist(self):
         e = self._engine()
@@ -628,6 +641,58 @@ class TestOutputPlaceholderMerge(unittest.TestCase):
             import shutil
             shutil.rmtree(e.args.out, ignore_errors=True)
         self.assertIn(("b.example.com", ""), e.assets)
+
+
+# ----------------------------------------------------------------------------
+# 输出格式选择（--formats / 界面开关）
+# ----------------------------------------------------------------------------
+class TestOutputFormats(unittest.TestCase):
+    def _run_output(self, fmt):
+        e = shadowmap.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        a = e.add_asset("a.example.com", 443, "https", source="anchor")
+        a.title = "测试站"
+        outdir = tempfile.mkdtemp(prefix="sm_fmt_")
+        e.args.out = outdir
+        e.args.active = False
+        if fmt is not None:
+            e.args.output_formats = fmt
+        try:
+            files, json_path, md_path = e.output()
+            produced = sorted(os.listdir(outdir))
+        finally:
+            shutil.rmtree(outdir, ignore_errors=True)
+        return files, json_path, md_path, produced
+
+    def test_md_only(self):
+        files, json_path, md_path, produced = self._run_output("md")
+        self.assertEqual(files, {})
+        self.assertEqual(json_path, "")
+        self.assertTrue(md_path.endswith(".md"))
+        self.assertEqual(len(produced), 1)
+        self.assertTrue(produced[0].endswith(".md"))
+
+    def test_csv_only(self):
+        files, json_path, md_path, produced = self._run_output("csv")
+        self.assertEqual(len(files), 4)
+        self.assertEqual(json_path, "")
+        self.assertEqual(md_path, "")
+        self.assertEqual(len(produced), 4)
+        self.assertTrue(all(p.endswith(".csv") for p in produced))
+
+    def test_default_all_formats(self):
+        # 未指定 output_formats 属性 → 默认全出（向后兼容）
+        files, json_path, md_path, produced = self._run_output(None)
+        self.assertEqual(len(files), 4)
+        self.assertTrue(json_path.endswith(".json"))
+        self.assertTrue(md_path.endswith(".md"))
+        self.assertEqual(len(produced), 6)
+
+    def test_combined(self):
+        files, json_path, md_path, produced = self._run_output("md,csv")
+        self.assertEqual(len(files), 4)
+        self.assertEqual(json_path, "")
+        self.assertTrue(md_path.endswith(".md"))
+        self.assertEqual(len(produced), 5)
 
 
 if __name__ == "__main__":

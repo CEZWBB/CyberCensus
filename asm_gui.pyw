@@ -110,10 +110,12 @@ def parse_targets(text):
 
 def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
-               out="shadowmap_out", config=CONFIG_PATH, debug_provider=False):
+               out="shadowmap_out", config=CONFIG_PATH, debug_provider=False,
+               formats=None):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
+    formats: 输出格式列表（"md"/"csv"/"json" 的子集），空=全部
     """
     active = (mode == "active")
     args = argparse.Namespace(
@@ -122,6 +124,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         timeout=10.0,
         scan_timeout=2.5,
         out=out,
+        output_formats=(",".join(formats) if formats else "md,csv,json"),
         no_probe=(mode == "passive"),
         no_discover=False,   # 名称模式默认启用搜索引擎官网自举（被动模式自动跳过）
         probe_found=False,
@@ -379,6 +382,17 @@ class App(ctk.CTk):
         ctk.CTkButton(f, text="浏览…", width=70, command=self._browse_out
                       ).grid(row=2, column=4, sticky="w")
 
+        ctk.CTkLabel(f, text="输出格式").grid(row=3, column=0, sticky="e", padx=(14, 4), pady=6)
+        self.var_fmt_md = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(f, text="报告(MD)", variable=self.var_fmt_md
+                      ).grid(row=3, column=1, sticky="w")
+        self.var_fmt_csv = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(f, text="资产台账(CSV)", variable=self.var_fmt_csv
+                      ).grid(row=3, column=2, columnspan=2, sticky="w")
+        self.var_fmt_json = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(f, text="原始数据(JSON)", variable=self.var_fmt_json
+                      ).grid(row=3, column=4, sticky="w")
+
     # ---- 主题 / 选项面板 ----
     def _toggle_theme(self):
         mode = "dark" if self.var_dark.get() else "light"
@@ -531,6 +545,9 @@ class App(ctk.CTk):
                 return
         platforms = [n for n, v in self.var_platforms.items() if v.get()]
         outdir = os.path.abspath(self.var_out.get().strip() or "shadowmap_out")
+        formats = [k for k, v in (("md", self.var_fmt_md.get()),
+                                  ("csv", self.var_fmt_csv.get()),
+                                  ("json", self.var_fmt_json.get())) if v]
         args = build_args(
             mode, platforms,
             threads=_to_int(self.cmb_threads.get(), 20),
@@ -541,6 +558,7 @@ class App(ctk.CTk):
             full_ports=self.var_fullports.get(),
             out=outdir,
             debug_provider=self.var_debug.get(),
+            formats=(formats or ["md"]),   # 一个都不选时至少出 MD 报告
         )
         self._last_out_dir = args.out
 
@@ -615,8 +633,9 @@ class App(ctk.CTk):
         self._append_log("=" * 60, "#")
         self._append_log("完成：确认 %d | 疑似 %d | 剔除 %d | 合计 %d"
                          % (counts["确认"], counts["疑似"], counts["存疑"], len(eng.assets)), "#")
+        if files.get("confirmed"):
+            self._append_log("确认台账：%s" % files["confirmed"], "+")
         if files:
-            self._append_log("确认台账：%s" % files.get("confirmed"), "+")
             self.btn_open_out.configure(state="normal")
         if md_path:
             self._last_md_path = md_path

@@ -879,16 +879,31 @@ class Engine(object):
 
         验证通过的域名加入 self.domains（后续 build_anchors/crt.sh/DNS/whois
         整条链对其生效）；验证不过的只记日志，不污染锚点。
-        需要 --no-probe 未启用（验证必须访问候选域名首页）。
+        纯被动模式（--no-probe）不能探测候选首页，但查搜索引擎属于第三方
+        数据源不触碰目标——候选域名以**未验证弱锚点**加入，结果只进"疑似"。
         """
         if not self.names:
             return
-        if getattr(self.args, "no_probe", False):
-            log("纯被动模式无法探测候选域名做验证，跳过官网自举"
-                "（可去掉 --no-probe 或补充域名输入）。", "!")
-            return
         if self.domains or self.input_ips:
             return  # 已有域名/IP 输入，不需要自举
+        if getattr(self.args, "no_probe", False):
+            for name in self.names:
+                cands = discover_domains_from_search(name, max_candidates=3)
+                added = []
+                for dom, score in cands:
+                    root = root_domain(dom)
+                    if not root or root in SEARCH_JUNK_ROOTS:
+                        continue
+                    if root not in self.domains:
+                        self.domains.add(root)
+                        self.anchor["weak_domains"].add(root)
+                        added.append(root)
+                if added:
+                    log("纯被动模式：搜索引擎候选域名（未验证，结果只进疑似）: %s"
+                        % ", ".join(added), "+")
+                else:
+                    log("搜索引擎未找到 %s 的候选域名。" % name, "!")
+            return
         for name in self.names:
             cands = discover_domains_from_search(name)
             if not cands:
@@ -912,15 +927,26 @@ class Engine(object):
                 continue
             title = info.get("title", "") or ""
             if _org_match(name, title):
-                self.domains.add(dom)
+                self._add_verified_domain(dom)
                 return True
             if scheme == "https":
                 cert = tls_cert_info(dom, port, timeout=self.args.timeout)
                 org = (cert or {}).get("org", "")
                 if org and _org_match(name, org):
-                    self.domains.add(dom)
+                    self._add_verified_domain(dom)
                     return True
         return False
+
+    def _add_verified_domain(self, dom):
+        """验证通过的域名：主机名与根域名都入锚点。
+
+        根域名必须加——子域枚举（crt.sh/hackertarget）按根域查才能拿到
+        全部子域；只枚举 www.xxx.cn 这一个主机名会漏掉其它子站。
+        """
+        self.domains.add(dom)
+        root = root_domain(dom)
+        if root and root != dom:
+            self.domains.add(root)
 
     # ---- 1. 锚点建立 ----
     def build_anchors(self, probe=True):
@@ -1555,40 +1581,59 @@ class Engine(object):
                         plain_evidence(a.evidence),
                     ])
 
+        # 输出格式选择（--formats / 界面开关）：md / csv / json；未指定=全出
+        fmts = getattr(self.args, "output_formats", None)
+        if isinstance(fmts, str):
+            fmts = {f.strip().lower() for f in fmts.split(",") if f.strip()}
+        elif isinstance(fmts, (list, tuple, set)):
+            fmts = {str(f).strip().lower() for f in fmts if str(f).strip()}
+        else:
+            fmts = None
+        if not fmts:
+            fmts = {"md", "csv", "json"}
+
         files = {}
-        files["confirmed"] = base + "_confirmed.csv"
-        files["suspect"] = base + "_suspect.csv"
-        files["rejected"] = base + "_rejected.csv"
-        files["all"] = base + "_all.csv"
-        write_csv(files["confirmed"], groups["确认"])
-        write_csv(files["suspect"], groups["疑似"])
-        write_csv(files["rejected"], groups["存疑"])
-        write_csv(files["all"], rows)
+        if "csv" in fmts:
+            files["confirmed"] = base + "_confirmed.csv"
+            files["suspect"] = base + "_suspect.csv"
+            files["rejected"] = base + "_rejected.csv"
+            files["all"] = base + "_all.csv"
+            write_csv(files["confirmed"], groups["确认"])
+            write_csv(files["suspect"], groups["疑似"])
+            write_csv(files["rejected"], groups["存疑"])
+            write_csv(files["all"], rows)
 
-        json_path = base + ".json"
-        meta = {
-            "names": self.names,
-            "domains": sorted(self.anchor["domains"]),
-            "input_ips": sorted(self.input_ips),
-            "anchor": {k: sorted(v) for k, v in self.anchor.items()},
-            "ip_notes": self.ip_notes,
-            "provider_stats": self.provider_stats,
-            "provider_records": len(self.provider_records),
-            "counts": {k: len(v) for k, v in groups.items()},
-            "assets": [a.to_dict() for a in rows],
-            "generated_at": ts,
-        }
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        json_path = ""
+        if "json" in fmts:
+            json_path = base + ".json"
+            meta = {
+                "names": self.names,
+                "domains": sorted(self.anchor["domains"]),
+                "input_ips": sorted(self.input_ips),
+                "anchor": {k: sorted(v) for k, v in self.anchor.items()},
+                "ip_notes": self.ip_notes,
+                "provider_stats": self.provider_stats,
+                "provider_records": len(self.provider_records),
+                "counts": {k: len(v) for k, v in groups.items()},
+                "assets": [a.to_dict() for a in rows],
+                "generated_at": ts,
+            }
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        md_path = base + ".md"
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(self._report(rows, groups, ts))
+        md_path = ""
+        if "md" in fmts:
+            md_path = base + ".md"
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(self._report(rows, groups, ts))
 
         for k in ("confirmed", "suspect", "rejected", "all"):
-            log("%-10s %s" % (k, files[k]), "+")
-        log("JSON      %s" % json_path, "+")
-        log("MD        %s" % md_path, "+")
+            if k in files:
+                log("%-10s %s" % (k, files[k]), "+")
+        if json_path:
+            log("JSON      %s" % json_path, "+")
+        if md_path:
+            log("MD        %s" % md_path, "+")
         return files, json_path, md_path
 
     def _report(self, rows, groups, ts):
@@ -1854,6 +1899,8 @@ def build_parser():
     p.add_argument("--scan-timeout", type=float, default=2.5, dest="scan_timeout",
                    help="TCP 端口扫描连接超时秒数（默认2.5；与 --timeout 的 HTTP 超时独立）")
     p.add_argument("--out", default="shadowmap_out", help="输出目录")
+    p.add_argument("--formats", default="md,csv,json", dest="output_formats",
+                   help="输出哪些格式：md / csv / json，逗号分隔（默认全出）")
     p.add_argument("--no-probe", action="store_true", help="完全不触碰目标（纯第三方数据）")
     p.add_argument("--no-discover", action="store_true",
                    help="仅给名称时禁用搜索引擎官网自举（默认启用）")
@@ -2024,8 +2071,10 @@ def main():
     print("=" * 64)
     print("完成：确认 %d | 疑似 %d | 剔除 %d | 合计 %d"
           % (counts["确认"], counts["疑似"], counts["存疑"], len(eng.assets)))
-    print("确认台账：%s" % files["confirmed"])
-    print("报告：%s" % md_path)
+    if files.get("confirmed"):
+        print("确认台账：%s" % files["confirmed"])
+    if md_path:
+        print("报告：%s" % md_path)
     print("=" * 64)
     return 0
 
