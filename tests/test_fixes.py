@@ -1165,5 +1165,56 @@ class TestAbbreviationSupport(unittest.TestCase):
         self.assertNotIn("10086.cn", e.domains)
 
 
+# ----------------------------------------------------------------------------
+# 移动端 APP 发现（App Store 免费 API）
+# ----------------------------------------------------------------------------
+class TestAppDiscovery(unittest.TestCase):
+    def test_itunes_parse(self):
+        data = {"resultCount": 1, "results": [
+            {"trackName": "测试APP", "sellerName": "Test Co", "bundleId": "cn.test.app",
+             "version": "1.0", "sellerUrl": "https://www.test.com", "trackViewUrl": "x"}]}
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda url, **kw: json.dumps(data)
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        apps = cybercensus.itunes_search_apps("测试")
+        self.assertEqual(apps[0]["trackName"], "测试APP")
+        self.assertEqual(apps[0]["sellerUrl"], "https://www.test.com")
+
+    def test_seller_match_cn_en(self):
+        # 四川移动 ↔ China Mobile Group Sichuan Company Limited
+        self.assertTrue(cybercensus._seller_match(
+            "四川移动", "China Mobile Group Sichuan Company Limited"))
+        self.assertFalse(cybercensus._seller_match(
+            "四川移动", "China Mobile Online Services Co., Ltd."))   # 缺 Sichuan
+        self.assertFalse(cybercensus._seller_match(
+            "四川移动", "Sichuan Cooking Co."))                      # 缺 mobile
+
+    def test_discover_apps_relevance(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.names = ["四川移动"]
+        data = {"results": [
+            {"trackName": "四川移动O域门户", "sellerName": "China Mobile Group Sichuan Company Limited",
+             "bundleId": "cn.a", "sellerUrl": ""},
+            {"trackName": "移动大掌柜", "sellerName": "China Mobile Group Sichuan Company Limited",
+             "bundleId": "cn.b", "sellerUrl": "https://sc.10086.cn/app"},
+            {"trackName": "铁路12306", "sellerName": "Railway Co", "bundleId": "cn.c",
+             "sellerUrl": ""},
+            # 凑巧共享"四川/移动"bigram 的无关应用（实测误报样例）必须拒绝
+            {"trackName": "微乐四川麻将移动版", "sellerName": "Changchun Dingyuan Network",
+             "bundleId": "cn.d", "sellerUrl": ""},
+        ]}
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda url, **kw: json.dumps(data)
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        e.discover_apps()
+        names = [a[0] for a in e.apps]
+        self.assertIn("四川移动O域门户", names)   # 应用名匹配
+        self.assertIn("移动大掌柜", names)        # 开发者地域+行业词匹配
+        self.assertNotIn("铁路12306", names)      # 无关应用被拒
+        self.assertNotIn("微乐四川麻将移动版", names)  # 共享 bigram 的误报样例被拒
+        # 开发者主页域名进入候选
+        self.assertIn("sc.10086.cn", e._ref_candidates)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

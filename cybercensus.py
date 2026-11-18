@@ -1038,6 +1038,55 @@ def _gather_subdomain_sources(domain, timeout=25):
     return out
 
 
+def itunes_search_apps(name, country="cn", limit=15):
+    """Apple App Store 搜索 API（免费、无 Key、JSON）——移动端 APP 发现。
+
+    返回原始结果列表 [{trackName, sellerName, bundleId, version, sellerUrl}, ...]；
+    归属过滤由 Engine.discover_apps 做（应用名/开发者/地域行业词互证）。
+    """
+    try:
+        url = ("https://itunes.apple.com/search?term=%s&country=%s"
+               "&entity=software&limit=%d"
+               % (urllib.parse.quote(name), country, limit))
+        data = json.loads(http_get(url, timeout=15, retries=1))
+        out = []
+        for a in data.get("results", []) or []:
+            if not isinstance(a, dict):
+                continue
+            out.append({
+                "trackName": str(a.get("trackName") or ""),
+                "sellerName": str(a.get("sellerName") or ""),
+                "bundleId": str(a.get("bundleId") or ""),
+                "version": str(a.get("version") or ""),
+                "sellerUrl": str(a.get("sellerUrl") or ""),
+                "trackViewUrl": str(a.get("trackViewUrl") or ""),
+            })
+        return out
+    except Exception:
+        return []
+
+
+_SECTOR_EN = {
+    "移动": "mobile", "电信": "telecom", "联通": "unicom", "银行": "bank",
+    "医院": "hospital", "保险": "insurance", "邮政": "post", "电力": "power",
+    "大学": "university", "学校": "school", "集团": "group",
+}
+
+
+def _seller_match(name, seller):
+    """中文单位名 ↔ 英文开发者名（App Store 的 sellerName 常是英文）。
+
+    地域拼音 + 行业英文词双重核验：四川移动 ↔ "China Mobile Group Sichuan ..."。
+    """
+    s = (seller or "").lower()
+    if not s:
+        return False
+    prov_ok = any(c in s for prov, codes in PROVINCE_CODES.items()
+                  if prov in name for c in codes if len(c) > 2)
+    sec_ok = any(en in s for zh, en in _SECTOR_EN.items() if zh in name)
+    return prov_ok and sec_ok
+
+
 def bing_exact_hosts(query):
     """搜索引擎精确短语查询 → 命中的站点主机列表（滤掉搜索引擎/聚合站）。
 
@@ -1418,6 +1467,7 @@ class Engine(object):
         self.provider_stats = {}
         self.risk_hints = []      # 搜索引擎情报线索 [(类别, url), ...]
         self._ref_candidates = [] # 页面外链/JS 引用的域名（待互证候选）
+        self.apps = []            # 移动端 APP 资产 [(名称, 开发者, 包名, 归属依据), ...]
         self.rejected = []        # 被剔除的资产（含原因）
 
     # ---- 资产登记 ----
@@ -2409,6 +2459,49 @@ class Engine(object):
                 if self._verify_candidate_domain(name, root):
                     log("  公众号关联域名验证通过: %s" % root, "+")
 
+    def discover_apps(self):
+        """移动端 APP 发现（App Store 免费 API，文档阶段六）。
+
+        归属过滤三通道：应用名含单位名（严格/宽松）/ 开发者匹配锚点组织名 /
+        中文名 ↔ 英文开发者（地域拼音+行业英文词，四川移动↔China Mobile Group
+        Sichuan）。开发者主页 URL 的域名作为候选喂给页面引用互证。
+        """
+        if not self.names:
+            return
+        names = set(self.names) | set(self.anchor.get("orgs") or ())
+        seen = set()
+        for name in self.names:
+            for app in itunes_search_apps(name):
+                track = app.get("trackName") or ""
+                seller = app.get("sellerName") or ""
+                if not track or track in seen:
+                    continue
+                reason = ""
+                # 应用名：模糊阈值提到 80%——"微乐四川麻将移动版" 这类
+                # 凑巧共享"四川/移动"bigram 的无关应用必须拒掉
+                if any(n and (_org_match(n, track)
+                              or _org_match_fuzzy(n, track, min_cov=0.8))
+                       for n in self.names):
+                    reason = "应用名含单位名"
+                # 开发者 vs 锚点组织：英文名共享 Technology/Co Ltd 等词元，
+                # 模糊匹配误报率高，只用严格包含
+                elif any(n and _org_match(n, seller) for n in names):
+                    reason = "开发者匹配锚点组织"
+                elif any(_seller_match(n, seller) for n in self.names):
+                    reason = "开发者含地域+行业词"
+                if not reason:
+                    continue
+                seen.add(track)
+                self.apps.append((track, seller, app.get("bundleId") or "", reason))
+                log("  APP: %s | 开发者: %s | %s" % (track, seller, reason), "+")
+                # 开发者主页域名作为候选资产（互证后入锚点）
+                su = app.get("sellerUrl") or ""
+                m = re.match(r"https?://([^/:?#]+)", su)
+                if m:
+                    self._ref_candidates.append(m.group(1))
+        if self.apps:
+            log("移动端 APP 发现: %d 个（清单见报告）" % len(self.apps), "+")
+
     def mine_and_verify_refs(self, limit=6):
         """页面外链/JS 引用挖掘（文档 5.2 前端深挖金矿）。
 
@@ -2506,6 +2599,8 @@ class Engine(object):
                 "provider_stats": self.provider_stats,
                 "provider_records": len(self.provider_records),
                 "counts": {k: len(v) for k, v in groups.items()},
+                "apps": self.apps,
+                "risk_hints": self.risk_hints,
                 "assets": [a.to_dict() for a in rows],
                 "generated_at": ts,
             }
@@ -2639,6 +2734,19 @@ class Engine(object):
                 L.append("| %s:%s | %s | %s |" % (_md(a.host), _md(str(a.port or "")),
                                                   _md(a.confidence), _md(names)))
             L.append("")
+
+        # ---- 移动端 APP 资产 ----
+        if self.apps:
+            L.append("## 📱 移动端应用（App Store，%d 个）\n" % len(self.apps))
+            L.append("| 应用名 | 开发者 | 包名 | 归属依据 |")
+            L.append("|--------|--------|------|----------|")
+            for track, seller, bundle, reason in self.apps:
+                L.append("| %s | %s | %s | %s |" % (
+                    _md(track), _md(seller), _md(bundle), _md(reason)))
+            L.append("")
+            L.append("> 说明：iOS 端由 App Store 公开搜索发现；**Android 各商店（应用宝/华为/小米）"
+                     "为客户端加载无法免登录自动抓取**，建议人工在应用商店搜索补全；"
+                     "小程序与公众号账号本身需人工核实（小程序业务域名通常已含在本台账域名中）。\n")
 
         # ---- 风险线索（搜索引擎情报） ----
         if self.risk_hints:
@@ -2854,6 +2962,10 @@ def build_parser():
                    help="--probe-found 时最多探测多少个主机（默认100）")
     p.add_argument("--probe-interval", type=float, default=0, dest="probe_interval",
                    help="主动 HTTP 探测的全局请求间隔秒数（默认0=不节流；建议 0.1~0.5 降噪）")
+    p.add_argument("--no-apps", action="store_true",
+                   help="不查 App Store（移动端 APP 发现，默认开启）")
+    p.add_argument("--no-hints", action="store_true",
+                   help="不做搜索引擎 dork 风险情报（默认开启）")
     p.add_argument("--sensitive", action="store_true",
                    help="对存活 Web 资产做敏感路径探测（.git/.env/Actuator/Swagger/备份等；active 模式默认开启）")
     p.add_argument("--no-sensitive", action="store_true",
@@ -2926,6 +3038,9 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         # 公众号文章域名挖掘（文档阶段六；需探测验证，纯被动模式跳过）
         if not args.no_probe:
             eng.mine_weixin_domains()
+        # 移动端 APP 发现（App Store 免费 API，第三方查询不触碰目标）
+        if not getattr(args, "no_apps", False):
+            eng.discover_apps()
         # 多平台聚合（FOFA / 0.zone / Hunter / DayDayMap）
         if not args.no_providers:
             eng.collect_providers()
