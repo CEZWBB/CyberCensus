@@ -879,5 +879,62 @@ class TestUAMobile(unittest.TestCase):
         self.assertIn("Android", joined)
 
 
+# ----------------------------------------------------------------------------
+# 统一社会信用代码：GB32100 校验 + 页面提取 + A 级证据
+# ----------------------------------------------------------------------------
+class TestCreditCode(unittest.TestCase):
+    VALID = "91110000100003962Y"
+
+    def test_checksum_validation(self):
+        self.assertTrue(cybercensus._credit_code_ok(self.VALID))
+        # 校验码错误的代码必须被拒（差一位即失败）
+        self.assertFalse(cybercensus._credit_code_ok(self.VALID[:17] + "X"))
+        self.assertFalse(cybercensus._credit_code_ok(""))
+        self.assertFalse(cybercensus._credit_code_ok("123"))
+
+    def test_extract_with_chinese_boundary(self):
+        # 中文紧邻代码的场景（\b 会失效，必须环视）
+        txt = "统一社会信用代码：%s　粤ICP备13075739号" % self.VALID
+        self.assertEqual(cybercensus.extract_credit_code(txt), self.VALID)
+        self.assertEqual(cybercensus.extract_credit_code("无代码页面"), "")
+        self.assertEqual(cybercensus.extract_credit_code(""), "")
+
+    def test_credit_code_evidence_is_a_level(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.anchor["credit_codes"].add(self.VALID)
+        a = e.add_asset("www.x.gov.cn", 443, "https", source="anchor")
+        a.credit_code = self.VALID
+        e.evaluate()
+        self.assertEqual(a.confidence, "确认")
+        self.assertTrue(any(x.startswith("A|页面含统一社会信用代码") for x in a.evidence))
+        self.assertIn("法定唯一标识", cybercensus.plain_evidence(a.evidence))
+
+
+# ----------------------------------------------------------------------------
+# 搜索引擎风险情报（dork）
+# ----------------------------------------------------------------------------
+class TestRiskHints(unittest.TestCase):
+    def test_dork_urls_extract(self):
+        html = ('<h2><a href="https://github.com/a/repo">r</a></h2>'
+                '<h2><a href="https://www.x.com/admin">a</a></h2>')
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda url, **kw: html
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        urls = cybercensus.bing_dork_urls("site:x.com inurl:admin")
+        self.assertEqual(urls, ["https://github.com/a/repo", "https://www.x.com/admin"])
+
+    def test_collect_risk_hints(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.anchor["domains"].add("x.com")
+        e.domains = {"x.com"}
+        orig = cybercensus.bing_dork_urls
+        cybercensus.bing_dork_urls = lambda q: ["https://www.x.com/admin"] \
+            if "inurl:admin" in q else ["https://github.com/x/x"]
+        self.addCleanup(cybercensus.__setattr__, "bing_dork_urls", orig)
+        e.collect_risk_hints()
+        kinds = {k for k, _ in e.risk_hints}
+        self.assertEqual(kinds, {"后台/登录入口", "GitHub代码泄露"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

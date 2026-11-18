@@ -169,6 +169,40 @@ def _beian_key(s):
     return m.group(1) if m else ""
 
 
+# ----------------------------------------------------------------------------
+# 统一社会信用代码（GB 32100-2015）：文档 7.2 的 A 级证据，几乎零误报。
+# 18 位 = 1位登记管理部门 + 1位机构类别 + 6位登记区划 + 9位主体标识 + 1位校验码。
+# 带 GB32100 校验码验证——正则命中的字符串还要通过校验才算真代码。
+# ----------------------------------------------------------------------------
+_CREDIT_CHARS = "0123456789ABCDEFGHJKLMNPQRTUWXY"
+_CREDIT_WEIGHTS = (1, 3, 9, 27, 19, 26, 16, 17, 20, 29, 25, 13, 8, 24, 10, 30, 28)
+# 注：不用 \b——Python3 的 \w 含中文，"莞城91120..." 这种紧邻中文的场景会漏配
+CREDIT_CODE_RE = re.compile(r"(?<![0-9A-HJ-NPQRTUWXY])([0-9A-HJ-NPQRTUWXY]{18})(?![0-9A-HJ-NPQRTUWXY])")
+
+
+def _credit_code_ok(code):
+    """统一社会信用代码 GB32100 校验码验证。"""
+    code = (code or "").strip().upper()
+    if len(code) != 18:
+        return False
+    try:
+        total = sum(_CREDIT_WEIGHTS[i] * _CREDIT_CHARS.index(code[i]) for i in range(17))
+        check = _CREDIT_CHARS[(31 - total % 31) % 31]
+        return check == code[17]
+    except ValueError:
+        return False
+
+
+def extract_credit_code(text):
+    """从页面/摘要文本提取第一个通过校验的统一社会信用代码；没有返回空串。"""
+    if not text:
+        return ""
+    for m in CREDIT_CODE_RE.finditer(str(text).upper()):
+        if _credit_code_ok(m.group(1)):
+            return m.group(1)
+    return ""
+
+
 # whois 隐私保护占位组织名：不是真实注册主体，不能进证据锚点
 PRIVACY_ORG_MARKERS = (
     "REDACTED FOR PRIVACY", "WhoisGuard", "Registration Private",
@@ -302,7 +336,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
 
     out = {"url": url, "status": "", "title": "", "server": "",
            "powered": "", "beian": "", "analytics": "", "favicon": "",
-           "tech": "", "body_len": 0}
+           "tech": "", "body_len": 0, "credit_code": ""}
     body = ""
     status = ""
     hdrs = {}
@@ -337,6 +371,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     mb = BEIAN_RE.search(body)
     if mb:
         out["beian"] = mb.group(1)
+    out["credit_code"] = extract_credit_code(body)   # 页脚常印统一社会信用代码
 
     for name, pat in ANALYTICS_PATTERNS:
         ma = pat.search(body)
@@ -669,15 +704,16 @@ def search_engine_lookup(name, timeout=15):
         return "", []
 
 
-def discover_domains_from_search(name, max_candidates=5):
+def discover_domains_from_search(name, max_candidates=5, lookup=None):
     """从搜索引擎结果提取候选官网域名，返回 [(host, score), ...] 按分排序。
 
     - 有机链接 host 记 3 分（结果标题直接链接的目标）
     - 正文/摘要中出现的域名记 1 分/次（目录站摘要常含官网链接）
     - 搜索引擎自身与聚合目录站（SEARCH_JUNK_ROOTS）直接排除
     - gov.cn 门户等误留候选交给上层探测验证过滤
+    - lookup: 可传入已取好的 (text, hosts)，避免重复请求搜索引擎
     """
-    text, hosts = search_engine_lookup(name)
+    text, hosts = lookup if lookup else search_engine_lookup(name)
     if not text and not hosts:
         return []
     scores = {}
@@ -783,13 +819,12 @@ def bing_site_subdomains(domain):
     return out
 
 
-def bing_beian_search(beian):
-    """搜索引擎搜备案号：页面里印着同一备案号的站点（A 级证据线索）。
+def bing_exact_hosts(query):
+    """搜索引擎精确短语查询 → 命中的站点主机列表（滤掉搜索引擎/聚合站）。
 
-    对应方法论文档的"备案号是最强反查钥匙"——拿到锚点备案号后反查，
-    能找到所有底部印着这个号的站点（含平台未收录的），误报极低。
+    备案号反查、统一社会信用代码反查共用此通道（文档 7.2 的 A 级证据线）。
     """
-    text, hosts = search_engine_lookup('"%s"' % beian)
+    text, hosts = search_engine_lookup(query)
     out = []
     seen = set()
     for h in hosts:
@@ -802,6 +837,33 @@ def bing_beian_search(beian):
             continue
         out.append(h)
     return out
+
+
+def bing_beian_search(beian):
+    """搜索引擎搜备案号：页面里印着同一备案号的站点（A 级证据线索）。
+
+    对应方法论文档的"备案号是最强反查钥匙"——拿到锚点备案号后反查，
+    能找到所有底部印着这个号的站点（含平台未收录的），误报极低。
+    """
+    return bing_exact_hosts('"%s"' % beian)
+
+
+def bing_dork_urls(query):
+    """搜索引擎 dork 查询 → 有机结果完整 URL 列表（风险情报用，不触碰目标）。"""
+    try:
+        url = ("https://cn.bing.com/search?q=" + urllib.parse.quote(query)
+               + "&count=20&mkt=zh-CN")
+        html = http_get(url, timeout=15, retries=1,
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        return re.findall(r'<h2><a[^>]+href="(https?://[^"]+)"', html)
+    except Exception:
+        return []
+
+
+def _url_host(u):
+    """提取 URL 主机名（小写，去端口）；解析失败返回空串。"""
+    m = re.match(r"[a-zA-Z]+://([^/:?#]+)", u or "")
+    return m.group(1).lower().rstrip(".") if m else ""
 
 
 def hackertarget_hostsearch(domain, timeout=20):
@@ -895,7 +957,7 @@ class Asset(object):
                  "powered", "tech", "cert_org", "cert_san", "beian",
                  "analytics", "favicon", "source", "evidence", "confidence",
                  "error", "prov_kinds", "providers", "prov_beian", "prov_cert",
-                 "prov_org", "reject_reason", "urls", "findings")
+                 "prov_org", "reject_reason", "urls", "findings", "credit_code")
 
     def __init__(self, host, port=None, scheme=None):
         self.host = host
@@ -924,6 +986,7 @@ class Asset(object):
         self.reject_reason = ""   # 剔除原因
         self.urls = set()
         self.findings = set()     # 敏感路径发现 ["路径|说明", ...]
+        self.credit_code = ""     # 页面含有的统一社会信用代码
 
     def key(self):
         p = self.port or (443 if self.scheme == "https" else 80 if self.scheme == "http" else "")
@@ -944,7 +1007,8 @@ def _merge_assets(dst, src):
     for s in ("source", "providers", "prov_kinds", "urls", "findings"):
         getattr(dst, s).update(getattr(src, s))
     for s in ("ip", "title", "server", "scheme", "status", "beian", "prov_beian",
-              "prov_cert", "prov_org", "cert_org", "cert_san", "analytics", "favicon"):
+              "prov_cert", "prov_org", "cert_org", "cert_san", "analytics",
+              "favicon", "credit_code"):
         if not getattr(dst, s):
             setattr(dst, s, getattr(src, s))
 
@@ -1115,10 +1179,11 @@ class Engine(object):
         self.sub_map = {}         # host -> ip (被动得到)
         self.anchor = {"orgs": set(), "beian": set(), "analytics": set(),
                        "favicon": set(), "ips": set(), "domains": set(),
-                       "weak_domains": set()}
+                       "weak_domains": set(), "credit_codes": set()}
         self.ip_notes = {}        # ip -> info dict
         self.provider_records = []
         self.provider_stats = {}
+        self.risk_hints = []      # 搜索引擎情报线索 [(类别, url), ...]
         self.rejected = []        # 被剔除的资产（含原因）
 
     # ---- 资产登记 ----
@@ -1167,7 +1232,13 @@ class Engine(object):
                     log("搜索引擎未找到 %s 的候选域名。" % name, "!")
             return
         for name in self.names:
-            cands = discover_domains_from_search(name)
+            # 一次搜索双用：候选域名 + 摘要里的统一社会信用代码（A 级锚点）
+            lookup = search_engine_lookup(name)
+            code = extract_credit_code(lookup[0])
+            if code:
+                self.anchor["credit_codes"].add(code)
+                log("搜索摘要发现统一社会信用代码: %s（法定唯一标识，A 级锚点）" % code, "+")
+            cands = discover_domains_from_search(name, lookup=lookup)
             if not cands:
                 log("搜索引擎未找到 %s 的候选域名；建议手动补充域名输入。" % name, "!")
                 continue
@@ -1182,13 +1253,18 @@ class Engine(object):
                 log("候选域名均未通过验证（标题/证书与主体名不符），未加入锚点。", "!")
 
     def _verify_candidate_domain(self, name, dom):
-        """探测候选域名首页，标题或证书 O= 与主体名互证即通过。"""
+        """探测候选域名首页，标题 / 证书 O= / 统一社会信用代码 任一互证即通过。"""
+        anchor_codes = set(self.anchor.get("credit_codes") or ())
         for scheme, port in (("https", 443), ("http", 80)):
             info = http_probe(dom, port, scheme, timeout=self.args.timeout)
             if info.get("status") in ("", None):
                 continue
             title = info.get("title", "") or ""
             if _org_match(name, title):
+                self._add_verified_domain(dom)
+                return True
+            # 页面含锚点信用代码：文档 7.2 的 A 级证据，直接确认
+            if info.get("credit_code") and info["credit_code"] in anchor_codes:
                 self._add_verified_domain(dom)
                 return True
             if scheme == "https":
@@ -1251,6 +1327,9 @@ class Engine(object):
                 if a.beian:
                     self.anchor["beian"].add(a.beian)
                     log("  锚点备案号: %s" % a.beian, "+")
+                if a.credit_code:
+                    self.anchor["credit_codes"].add(a.credit_code)
+                    log("  锚点统一社会信用代码: %s" % a.credit_code, "+")
                 if a.analytics:
                     self.anchor["analytics"].add(a.analytics)
                     log("  锚点统计ID: %s" % a.analytics, "+")
@@ -1361,6 +1440,25 @@ class Engine(object):
                     a = self.add_asset(h, None, None, source="search:beian")
                     if not a.prov_beian:
                         a.prov_beian = b
+
+        # 统一社会信用代码反查（A 级证据，无 Key 通道）：锚点代码 → 搜索引擎
+        # 找提到该代码的站点 → 探测首页确认页面真的含此代码 → 入正式锚点
+        for code in sorted(set(self.anchor["credit_codes"])):
+            hosts = bing_exact_hosts('"%s"' % code)[:5]
+            if not hosts:
+                continue
+            log("信用代码反查(%s): 搜索引擎候选 %d 个，逐个探测验证" % (code, len(hosts)))
+            for h in hosts:
+                if h in self.domains:
+                    continue
+                for scheme, port in (("https", 443), ("http", 80)):
+                    info = http_probe(h, port, scheme, timeout=self.args.timeout)
+                    if info.get("status") in ("", None):
+                        continue
+                    if info.get("credit_code") == code:
+                        self._add_verified_domain(h)
+                        log("  信用代码验证通过: %s" % h, "+")
+                        break
 
         # IP 反查
         all_ips = set(self.input_ips)
@@ -1550,6 +1648,7 @@ class Engine(object):
                 a.powered = info.get("powered", "")
                 a.tech = info.get("tech", "")
                 a.beian = info.get("beian", "") or a.beian
+                a.credit_code = info.get("credit_code", "") or a.credit_code
                 a.analytics = info.get("analytics", "") or a.analytics
                 a.favicon = info.get("favicon", "") or a.favicon
                 if cert:
@@ -1767,6 +1866,9 @@ class Engine(object):
             if a.beian and _beian_key(a.beian) in beian_keys:
                 ev.append("A|页面备案号一致:%s" % a.beian)
                 A += 1
+            if a.credit_code and a.credit_code in self.anchor["credit_codes"]:
+                ev.append("A|页面含统一社会信用代码:%s" % a.credit_code)
+                A += 1
             if a.cert_org and any(_org_match(o, a.cert_org) for o in orgs):
                 ev.append("A|证书O=一致:%s" % a.cert_org)
                 A += 1
@@ -1959,6 +2061,41 @@ class Engine(object):
                 json.dump(snap, f, ensure_ascii=False, indent=1)
         except Exception as e:
             log("基线保存失败: %s" % str(e)[:80], "!")
+
+    # ---- 4.7 搜索引擎风险情报（dork，不触碰目标） ----
+    def collect_risk_hints(self, max_domains=3):
+        """对主体域名做搜索引擎 dork 情报收集（文档第9步：谷歌语法 + GitHub）。
+
+        只列线索不作为资产：后台入口 / GitHub 代码泄露是后续人工渗透的方向标。
+        查询走第三方搜索引擎，不访问目标。
+        """
+        if not self.domains:
+            return
+        strong = sorted(set(self.anchor["domains"]) - set(self.anchor["weak_domains"]))
+        targets = (strong or sorted(self.domains))[:max_domains]
+        seen = set()
+        for d in targets:
+            for kind, query, check in (
+                    ("后台/登录入口", "site:%s (inurl:admin OR inurl:login)" % d,
+                     lambda u, d=d: _url_host(u).endswith("." + d) or _url_host(u) == d),
+                    ("GitHub代码泄露", 'site:github.com "%s"' % d,
+                     lambda u: "github.com" in _url_host(u)),
+            ):
+                time.sleep(0.8)   # 引擎节奏
+                n0 = len(self.risk_hints)
+                for u in bing_dork_urls(query):
+                    if u in seen:
+                        continue
+                    # Bing 的 site: 语法会漏进无关域名的结果，逐条校验归属
+                    try:
+                        if not check(u):
+                            continue
+                    except Exception:
+                        continue
+                    seen.add(u)
+                    self.risk_hints.append((kind, u))
+                if len(self.risk_hints) > n0:
+                    log("dork情报(%s): %s 命中 %d 条" % (kind, d, len(self.risk_hints) - n0), "+")
 
     # ---- 5. 输出 ----
     def output(self, baseline_diff=None):
@@ -2171,6 +2308,17 @@ class Engine(object):
                                                   _md(a.confidence), _md(names)))
             L.append("")
 
+        # ---- 风险线索（搜索引擎情报） ----
+        if self.risk_hints:
+            L.append("## 风险线索（搜索引擎情报，未验证）\n")
+            L.append("以下为搜索引擎 dork 收集的线索，**仅供人工排查方向参考**，")
+            L.append("点击前请确认在授权范围内（后台入口可能需要登录，GitHub 泄露可能含密钥）：\n")
+            L.append("| 类别 | 链接 |")
+            L.append("|------|------|")
+            for kind, u in self.risk_hints[:40]:
+                L.append("| %s | %s |" % (_md(kind), _md(u)))
+            L.append("")
+
         def table(items, show_reason=False):
             if not items:
                 L.append("_无_\n")
@@ -2226,6 +2374,7 @@ def _md(s):
 # 证据条目 → 新手可读的白话解释（按 evidence 前缀匹配，未命中保留原文）
 _PLAIN_EVIDENCE = (
     ("A|页面备案号一致", "网站页脚的ICP备案号与目标单位备案号一致"),
+    ("A|页面含统一社会信用代码", "页面中含有目标单位的统一社会信用代码（法定唯一标识）"),
     ("A|证书O=一致", "该站HTTPS证书的持有单位就是目标单位"),
     ("A|主域名子域", "是目标单位主域名的子域名"),
     ("A|平台cert命中", "测绘平台证书库显示该站证书含目标单位信息"),
@@ -2439,6 +2588,9 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
     eng.build_anchors(probe=not args.no_probe)
     if not _stopped():
         eng.collect_passive()
+        # 搜索引擎风险情报（dork：后台入口 / GitHub 泄露，不触碰目标）
+        if not getattr(args, "no_hints", False):
+            eng.collect_risk_hints()
         # 多平台聚合（FOFA / 0.zone / Hunter / DayDayMap）
         if not args.no_providers:
             eng.collect_providers()
