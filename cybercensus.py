@@ -327,20 +327,91 @@ ANALYTICS_PATTERNS = [
     ("cnzz", re.compile(r"cnzz\.com/(?:stat\.php\?id=|.*?[?&]id=)(\d{6,})")),
 ]
 
+# 指纹库（借鉴 ARL/ShuiZe/Goby 的国产组件覆盖）：
+# (显示名, 页面特征列表)；特征为空表示靠 Server 头识别
 TECH_MARKERS = [
-    ("ThinkPHP", ["thinkphp", "ThinkPHP"]),
-    ("Spring", ["Whitelabel Error Page", "spring"]),
+    # 通用框架/语言
+    ("ThinkPHP", ["thinkphp"]),
+    ("Spring", ["whitelabel error page"]),
     ("WordPress", ["wp-content", "wp-includes"]),
-    ("Shiro", ["rememberMe=deleteMe", "shiro"]),
+    ("Shiro", ["rememberme=deleteme"]),
+    ("Tomcat", ["apache tomcat", "tomcat"]),
+    ("Weblogic", ["weblogic"]),
     ("Nginx", []),
     ("IIS", []),
-    ("Tomcat", ["Apache Tomcat", "tomcat"]),
-    ("Weblogic", ["weblogic"]),
-    ("Jenkins", ["Jenkins"]),
+    ("Vue", ["__vue__", "/static/js/app."]),
+    ("React", ["__next_data__"]),
+    # 国产 OA / ERP / 报表（渗透高频目标，多为已知漏洞家族）
+    ("泛微OA", ["e-office", "ecology", "weaver"]),
+    ("致远OA", ["seeyon", "致远"]),
+    ("用友NC/U8", ["yonyou", "nccloud", "用友"]),
+    ("金蝶EAS", ["kingdee", "金蝶"]),
+    ("帆软报表", ["finereport", "finebi", "帆软"]),
+    ("通达OA", ["tongda", "通达"]),
+    ("蓝凌OA", ["landray", "蓝凌"]),
+    ("若依RuoYi", ["ruoyi"]),
+    ("JEECG", ["jeecg"]),
+    ("禅道", ["zentao"]),
+    # 中间件 / 管理台（未授权访问高频）
+    ("宝塔面板", ["bt panel", "宝塔", "bt.cn"]),
+    ("Nacos", ["nacos"]),
+    ("Eureka", ["eureka"]),
+    ("Zabbix", ["zabbix"]),
+    ("Grafana", ["grafana"]),
+    ("Kibana", ["kibana"]),
+    ("RabbitMQ管理", ["rabbitmq"]),
+    ("Solr", ["solr"]),
+    ("Harbor", ["harbor"]),
+    ("MinIO", ["minio"]),
+    ("Docker Registry", ["docker-distribution", "registry/2.0"]),
+    ("Kubernetes-Dashboard", ["kubernetes-dashboard"]),
+    ("Nexus", ["nexus repository"]),
+    ("Jira", ["jira"]),
+    ("Confluence", ["confluence"]),
+    ("GitLab", ["gitlab"]),
+    ("Jenkins", ["jenkins"]),
+    ("Exchange", ["owa/", "outlook web app"]),
+    ("深信服SSL-VPN", ["isclogin", "深信服"]),
+    ("Citrix", ["citrix"]),
     ("Swagger", ["swagger-ui", "swagger"]),
-    ("Vue", ["__VUE__", "/static/js/app."]),
-    ("React", ["__NEXT_DATA__", "react"]),
 ]
+
+# 风险组件提示：命中即提示"建议排查对应已知漏洞家族"（不执行任何 POC）
+RISKY_TECH = {
+    "泛微OA": "泛微 e-office/ecology 历史多个 RCE（文件上传/反序列化）",
+    "致远OA": "致远 OA 历史多个未授权 RCE（如 ajax.do 系列）",
+    "用友NC/U8": "用友 NC/U8 历史反序列化 RCE 与 SQL 注入",
+    "金蝶EAS": "金蝶 EAS 目录遍历/文件上传历史漏洞",
+    "帆软报表": "帆软 v8/v9 未授权访问与远程命令执行",
+    "通达OA": "通达 OA 未授权上传/命令执行历史漏洞",
+    "蓝凌OA": "蓝凌 OA 未授权命令执行历史漏洞",
+    "Shiro": "Shiro rememberMe 反序列化（默认密钥风险）",
+    "Weblogic": "Weblogic 多个反序列化 RCE（CVE-2015/2017/2019 系列）",
+    "Jenkins": "Jenkins 未授权脚本控制台（/script）风险",
+    "Solr": "Solr Velocity 模板 RCE / 未授权配置上传",
+    "Nacos": "Nacos 默认口令/未授权配置读取",
+    "RabbitMQ管理": "RabbitMQ 管理台默认口令 guest/guest",
+    "Zabbix": "Zabbix SQL 注入历史漏洞",
+    "Grafana": "Grafana 插件目录穿越历史漏洞",
+    "Kibana": "Kibana 原型污染 RCE 历史漏洞",
+    "Docker Registry": "Docker Registry 未授权镜像拉取",
+    "Kubernetes-Dashboard": "K8s Dashboard 未授权命令执行",
+    "MinIO": "MinIO 未授权访问历史漏洞",
+    "Harbor": "Harbor 未授权/权限提升历史漏洞",
+    "深信服SSL-VPN": "深信服 SSL VPN 历史预认证 RCE",
+    "Citrix": "Citrix ADC 历史预认证 RCE（CitrixBleed 等）",
+    "Exchange": "Exchange ProxyShell/ProxyLogon 历史漏洞",
+    "ThinkPHP": "ThinkPHP 历史上多个 RCE（5.x 系列）",
+}
+
+
+def tech_risk(tech):
+    """从指纹串找出命中的风险组件提示列表。"""
+    out = []
+    for name, note in RISKY_TECH.items():
+        if name.lower() in (tech or "").lower():
+            out.append("%s：%s" % (name, note))
+    return out
 
 QUIET = False
 LOG_HOOK = None   # GUI 注入的日志回调 hook(msg, level)；设置后日志只走钩子不打印
@@ -404,6 +475,29 @@ def http_get(url, timeout=15, retries=2, headers=None, binary=False,
     raise last_err
 
 
+EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# 明显的占位/静态资源误匹配
+_EMAIL_JUNK = ("example.", "test@", "@test.", ".png", ".jpg", ".gif",
+               ".js", ".css", "@2x", "sentry.io", "@w3.org", "you@", "your@",
+               "@domain.com")
+
+
+def _extract_emails(text, limit=8):
+    """从页面/摘要提取联系邮箱（去重、去占位与静态资源误匹配）。"""
+    out, seen = [], set()
+    for m in EMAIL_RE.finditer(text or ""):
+        e = m.group(0).strip(".").lower()
+        if len(e) > 80 or any(j in e for j in _EMAIL_JUNK):
+            continue
+        if e not in seen:
+            seen.add(e)
+            out.append(e)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _extract_meta(body):
     """提取页面 meta 描述/关键词/应用名——SPA 站标题为空时的关键互证文本。"""
     parts = []
@@ -424,7 +518,8 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
 
     out = {"url": url, "status": "", "title": "", "server": "",
            "powered": "", "beian": "", "analytics": "", "favicon": "",
-           "tech": "", "body_len": 0, "credit_code": "", "refs": [], "meta": ""}
+           "tech": "", "body_len": 0, "credit_code": "", "refs": [], "meta": "",
+           "emails": []}
     body = ""
     status = ""
     hdrs = {}
@@ -461,6 +556,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
         out["beian"] = mb.group(1)
     out["credit_code"] = extract_credit_code(body)   # 页脚常印统一社会信用代码
     out["meta"] = _extract_meta(body)                # SPA 站的单位名常在 meta 里
+    out["emails"] = _extract_emails(body)            # 页面联系邮箱
     # 页面外链/JS 引用的域名（文档 5.2 前端深挖金矿）：候选资产线索
     out["refs"] = [m.group(1) for m in _DOMAIN_IN_TEXT_RE.finditer(body)]
 
@@ -1306,6 +1402,34 @@ def tcp_open(host, port, timeout=3):
         return False
 
 
+def grab_banner(ip, port, timeout=3):
+    """端口 Banner 抓取：轻量服务识别（借鉴 Goby/ARL 的服务版本识别）。
+
+    不依赖 nmap：对 Web 端口发 HEAD，对 Redis 发 PING，其余直接读欢迎语
+    （SSH/FTP/SMTP/MySQL 等都会主动吐版本横幅）。返回首行文本或空串。
+    """
+    probes = {
+        6379: b"*1\r\n$4\r\nPING\r\n",
+    }
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            if port in (80, 8000, 8008, 8080, 8081, 8088, 888, 8888, 9000):
+                s.sendall(("HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n" % ip).encode())
+            elif port in probes:
+                s.sendall(probes[port])
+            try:
+                data = s.recv(512)
+            except socket.timeout:
+                return ""
+            text = data.decode("utf-8", "replace")
+            text = "".join(ch if ch.isprintable() else " " for ch in text)
+            text = " ".join(text.split())
+            return text[:120]
+    except Exception:
+        return ""
+
+
 def scan_ports(host, ports, threads=50, timeout=2.5):
     opened = []
     with ThreadPoolExecutor(max_workers=min(threads, max(1, len(ports)))) as ex:
@@ -1401,6 +1525,14 @@ def _chk_rar(b):
     return b[:4] == b"Rar!" and len(b) > 2048
 
 
+def _chk_targz(b):
+    return b[:2] == b"\x1f\x8b" and len(b) > 2048
+
+
+def _chk_sql(b):
+    return (b"CREATE TABLE" in b[:4096] or b"INSERT INTO" in b[:4096]) and len(b) > 1024
+
+
 SENSITIVE_PATHS = (
     ("/.git/config",          "Git仓库泄露(.git)",       _chk_git),
     ("/.svn/entries",         "SVN仓库泄露(.svn)",       _chk_svn),
@@ -1432,8 +1564,16 @@ def probe_sensitive_paths(host, port, scheme, timeout=6, interval=0.1):
         base = "%s://%s" % (scheme, host)
     else:
         base = "%s://%s:%d" % (scheme, host, port)
+    # 动态备份路径：按域名主体名生成（dggcyy.zip / dggcyy.sql 这类域名同名备份包）
+    extra = []
+    label = root_domain(host).split(".")[0] if root_domain(host) else ""
+    if label and len(label) >= 3 and label not in ("www", "com", "net", "org"):
+        for ext, chk in ((".zip", _chk_zip), (".rar", _chk_rar),
+                         (".tar.gz", _chk_targz), (".sql", _chk_sql)):
+            extra.append(("/%s%s" % (label, ext),
+                          "域名同名备份(%s%s)" % (label, ext), chk))
     hits = []
-    for path, name, check in SENSITIVE_PATHS:
+    for path, name, check in tuple(SENSITIVE_PATHS) + tuple(extra):
         try:
             # 泄露文件可能较大（heapdump/备份包），但只需头部判断特征，限 256KB
             data = http_get(base + path, timeout=timeout, retries=0,
@@ -1468,6 +1608,9 @@ class Engine(object):
         self.risk_hints = []      # 搜索引擎情报线索 [(类别, url), ...]
         self._ref_candidates = [] # 页面外链/JS 引用的域名（待互证候选）
         self.apps = []            # 移动端 APP 资产 [(名称, 开发者, 包名, 归属依据), ...]
+        self.contacts = set()     # 页面/摘要提取的联系邮箱
+        self._beian_candidates = set()  # 搜索摘要备案号候选（需自验证才升级）
+        self._code_candidates = set()   # 搜索摘要信用代码候选（需自验证才升级）
         self.rejected = []        # 被剔除的资产（含原因）
 
     # ---- 资产登记 ----
@@ -1485,6 +1628,27 @@ class Engine(object):
         return a
 
     # ---- 0.5 名称自举：搜索引擎找官网域名（无平台 Key 的第一跳） ----
+    def _absorb_search_text(self, text):
+        """从搜索引擎摘要吸收线索：备案号 / 信用代码（候选） / 联系邮箱。
+
+        注意：搜索摘要里出现的备案号/信用代码可能是**目录站自己的**
+        （求医网/博禾等聚合页同时提到单位名和它们自己的备案号），
+        直接当锚点会污染确认清单——所以只进 _beian_candidates /
+        _code_candidates 候选集，等 collect_passive 里用"反查结果包含
+        已知域名"自验证通过后才升级为正式锚点。
+        """
+        for m in BEIAN_RE.finditer(text or ""):
+            b = m.group(1)
+            if _beian_key(b) and b not in self.anchor["beian"]:
+                self._beian_candidates.add(b)
+                log("搜索摘要备案号候选（待验证）: %s" % b)
+        code = extract_credit_code(text)
+        if code and code not in self.anchor["credit_codes"]:
+            self._code_candidates.add(code)
+            log("搜索摘要信用代码候选（待验证）: %s" % code)
+        for e in _extract_emails(text):
+            self.contacts.add(e)
+
     def discover_names_to_domains(self):
         """名称 → 官网域名：搜索候选 → 首页探测 → 标题/证书O= 与主体名互证。
 
@@ -1499,7 +1663,9 @@ class Engine(object):
             return  # 已有域名/IP 输入，不需要自举
         if getattr(self.args, "no_probe", False):
             for name in self.names:
-                cands = discover_domains_from_search(name, max_candidates=3)
+                lookup = search_engine_lookup(name)
+                self._absorb_search_text(lookup[0])
+                cands = discover_domains_from_search(name, max_candidates=3, lookup=lookup)
                 added = []
                 for dom, score in cands:
                     root = root_domain(dom)
@@ -1516,18 +1682,17 @@ class Engine(object):
                     log("搜索引擎未找到 %s 的候选域名。" % name, "!")
             return
         for name in self.names:
-            # 搜索双用：候选域名 + 摘要里的统一社会信用代码（A 级锚点）。
-            # 简称/短名（如"四川移动"）补一轮"官网"查询提高命中率
+            # 搜索多轮：候选域名 + 摘要里的备案号/信用代码/邮箱（A 级锚点）。
+            # - name+"官网"：简称/短名提高官网命中率
+            # - name+"ICP备案"：从备案信息页摘要吸收备案号（ENscan 备案维度的免费等效）
             lookups = [search_engine_lookup(name)]
             if len(name) <= 6:
                 lookups.append(search_engine_lookup(name + " 官网"))
+            lookups.append(search_engine_lookup(name + " ICP备案"))
             text = " ".join(t for t, _ in lookups)
             hosts = [h for _, hs in lookups for h in hs]
             lookup = (text, hosts)
-            code = extract_credit_code(text)
-            if code:
-                self.anchor["credit_codes"].add(code)
-                log("搜索摘要发现统一社会信用代码: %s（法定唯一标识，A 级锚点）" % code, "+")
+            self._absorb_search_text(text)
             if len(name) <= 4:
                 log("提示：检测到简称（%s），搜索引擎对简称的收录命中率低于全称；"
                     "若结果不全，请改用全称重试（如\"中国移动通信集团四川有限公司\"）。" % name, "!")
@@ -1649,6 +1814,7 @@ class Engine(object):
                     log("  锚点统一社会信用代码: %s" % a.credit_code, "+")
                 for ref in (info.get("refs") or []):
                     self._ref_candidates.append(ref)
+                self.contacts.update(info.get("emails") or [])
                 if a.analytics:
                     self.anchor["analytics"].add(a.analytics)
                     log("  锚点统计ID: %s" % a.analytics, "+")
@@ -1752,6 +1918,41 @@ class Engine(object):
                     a = self.add_asset(h, None, None, source="search:beian")
                     if not a.prov_beian:
                         a.prov_beian = b
+
+        # 摘要候选备案号/信用代码自验证：反查结果必须包含已知域名才升级为锚点。
+        # 搜索摘要里常混入目录站（求医网/博禾等）自己的备案号——直接采信会把
+        # 目录站当目标资产（锚点污染）；反查无已知域名 = 疑似别人的号，丢弃。
+        def _hosts_known(hosts):
+            for h in hosts:
+                for d in self.domains:
+                    if d and (h == d or h.endswith("." + d)):
+                        return True
+            return False
+
+        for b in sorted(self._beian_candidates):
+            if b in self.anchor["beian"]:
+                continue
+            hosts = bing_beian_search(b)
+            if _hosts_known(hosts):
+                self.anchor["beian"].add(b)
+                log("摘要备案号候选验证通过（反查含已知域名）: %s" % b, "+")
+                for h in hosts:
+                    a = self.add_asset(h, None, None, source="search:beian")
+                    if not a.prov_beian:
+                        a.prov_beian = b
+            else:
+                log("摘要备案号候选未通过自验证（反查无已知域名，疑似目录站备案）: %s"
+                    % b, "!")
+
+        for code in sorted(self._code_candidates):
+            if code in self.anchor["credit_codes"]:
+                continue
+            hosts = bing_exact_hosts('"%s"' % code)[:5]
+            if _hosts_known(hosts):
+                self.anchor["credit_codes"].add(code)
+                log("摘要信用代码候选验证通过: %s" % code, "+")
+            else:
+                log("摘要信用代码候选未通过自验证: %s" % code, "!")
 
         # 统一社会信用代码反查（A 级证据，无 Key 通道）：锚点代码 → 搜索引擎
         # 找提到该代码的站点 → 探测首页确认页面真的含此代码 → 入正式锚点
@@ -1926,6 +2127,12 @@ class Engine(object):
             for p in sorted(opened):
                 a = self.add_asset(ip, p, "https" if p in (443, 8443, 9443) else "http",
                                    source="scan", ip=ip)
+                # 非 Web 服务抓 Banner 识别（SSH/Redis/MySQL 等）
+                if not is_web_port(p):
+                    banner = grab_banner(ip, p, timeout=self.args.scan_timeout)
+                    if banner:
+                        a.tech = (a.tech + "," if a.tech else "") + banner[:60]
+                        log("  %s:%d Banner: %s" % (ip, p, banner[:80]))
 
         # Web 探测
         self.probe_all_web()
@@ -1991,6 +2198,7 @@ class Engine(object):
                 a.favicon = info.get("favicon", "") or a.favicon
                 for ref in (info.get("refs") or []):
                     self._ref_candidates.append(ref)
+                self.contacts.update(info.get("emails") or [])
                 if cert:
                     a.cert_org = cert.get("org", "")
                     a.cert_san = ",".join(cert.get("sans", [])[:20])
@@ -2733,6 +2941,31 @@ class Engine(object):
                 names = "、".join(sorted(f.split("|", 1)[-1] for f in a.findings))
                 L.append("| %s:%s | %s | %s |" % (_md(a.host), _md(str(a.port or "")),
                                                   _md(a.confidence), _md(names)))
+            L.append("")
+
+        # ---- 风险组件提示（指纹命中的已知漏洞家族） ----
+        risky = []
+        for a in rows:
+            notes = tech_risk(a.tech)
+            if notes:
+                risky.append((a, notes))
+        if risky:
+            L.append("## ⚠️ 风险组件提示（%d 个资产，仅指纹识别，未执行任何验证）\n"
+                     % len(risky))
+            L.append("命中了有已知漏洞历史的组件——建议按对应漏洞家族排查（授权范围内）：\n")
+            L.append("| 资产 | 指纹 | 风险提示 |")
+            L.append("|------|------|----------|")
+            for a, notes in risky:
+                L.append("| %s:%s | %s | %s |" % (
+                    _md(a.host), _md(str(a.port or "")),
+                    _md(a.tech[:60]), _md("；".join(notes))))
+            L.append("")
+
+        # ---- 联系方式（页面提取） ----
+        if self.contacts:
+            L.append("## 联系方式（页面/摘要提取，%d 个）\n" % len(self.contacts))
+            for e in sorted(self.contacts):
+                L.append("- `%s`" % e)
             L.append("")
 
         # ---- 移动端 APP 资产 ----

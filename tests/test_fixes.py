@@ -548,7 +548,7 @@ class TestVerifyCandidateDomain(unittest.TestCase):
         e = self._engine()
         e.args.no_probe = True
         orig = cybercensus.discover_domains_from_search
-        cybercensus.discover_domains_from_search = lambda n, max_candidates=5: [
+        cybercensus.discover_domains_from_search = lambda n, max_candidates=5, lookup=None: [
             ("www.x.com", 3), ("www.y.com", 2)]
         self.addCleanup(cybercensus.__setattr__, "discover_domains_from_search", orig)
         e.discover_names_to_domains()
@@ -1214,6 +1214,59 @@ class TestAppDiscovery(unittest.TestCase):
         self.assertNotIn("微乐四川麻将移动版", names)  # 共享 bigram 的误报样例被拒
         # 开发者主页域名进入候选
         self.assertIn("sc.10086.cn", e._ref_candidates)
+
+
+# ----------------------------------------------------------------------------
+# 借鉴 ARL/ShuiZe/Goby/ENscan：风险组件 / 邮箱 / 动态备份 / 备案吸收
+# ----------------------------------------------------------------------------
+class TestToolLearning(unittest.TestCase):
+    def test_tech_risk(self):
+        notes = cybercensus.tech_risk("泛微OA,nginx")
+        self.assertTrue(any("泛微" in n for n in notes))
+        self.assertEqual(cybercensus.tech_risk("nginx"), [])
+
+    def test_extract_emails(self):
+        text = ("联系我们 kj@hospital.cn，投诉 ts@hospital.cn "
+                "以及 logo@2x.png 和 example@example.com 和 your@email.com")
+        emails = cybercensus._extract_emails(text)
+        self.assertIn("kj@hospital.cn", emails)
+        self.assertIn("ts@hospital.cn", emails)
+        self.assertNotIn("logo@2x.png", emails)
+        self.assertNotIn("example@example.com", emails)
+        self.assertNotIn("your@email.com", emails)
+
+    def test_chk_sql_and_targz(self):
+        self.assertTrue(cybercensus._chk_sql(b"-- MySQL dump\nCREATE TABLE x (...)" + b"x" * 1024))
+        self.assertFalse(cybercensus._chk_sql(b"<html>404</html>" * 100))
+        self.assertTrue(cybercensus._chk_targz(b"\x1f\x8b" + b"x" * 4096))
+        self.assertFalse(cybercensus._chk_targz(b"PK\x03\x04" + b"x" * 4096))
+
+    def test_absorb_search_text_candidates_only(self):
+        """摘要吸收只进候选集（防目录站备案号污染锚点），邮箱直接收。"""
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e._absorb_search_text("某某公司 粤ICP备13075739号 信用代码 91110000100003962Y "
+                              "联系 hr@dggcyy.cn")
+        self.assertIn("粤ICP备13075739号", e._beian_candidates)
+        self.assertNotIn("粤ICP备13075739号", e.anchor["beian"])   # 未验证前不得入锚点
+        self.assertIn("91110000100003962Y", e._code_candidates)
+        self.assertNotIn("91110000100003962Y", e.anchor["credit_codes"])
+        self.assertIn("hr@dggcyy.cn", e.contacts)
+
+    def test_dynamic_backup_paths(self):
+        """域名同名备份包探测：www.dggcyy.cn → 探测 /dggcyy.zip 等。"""
+        requested = []
+
+        def fake_get(url, **kw):
+            requested.append(url)
+            if url.endswith("/dggcyy.zip"):
+                return b"PK\x03\x04" + b"x" * 4096
+            raise OSError("404")
+        orig = cybercensus.http_get
+        cybercensus.http_get = fake_get
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        hits = cybercensus.probe_sensitive_paths("www.dggcyy.cn", 443, "https", interval=0)
+        self.assertTrue(any("/dggcyy.zip" in u for u in requested))
+        self.assertTrue(any("域名同名备份" in n for _, n in hits))
 
 
 if __name__ == "__main__":
