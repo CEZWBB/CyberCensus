@@ -163,6 +163,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         webhook=webhook or "",
         ext_tools=None,
         no_ext=not bool(ext),
+        ext_sub_limit=3000,
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）

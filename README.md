@@ -363,6 +363,7 @@ source, evidence, reject_reason, urls, plain
     - **wafw00f**（`-f json`）：精确 WAF 识别，写入资产指纹（`WAF:xxx`），与内置 14 种响应头指纹互补；
     - **nuclei**（`-json -severity critical,high,medium`）：**仅 `--active` 模式**运行，模板库由 nuclei 官方维护（本工具不维护任何 POC 模板），命中结果在报告「🔧 外部工具联动结果」节单列，标注"需人工复核"。
     控制：`--ext-tools subfinder,httpx` 只调用指定工具；`--no-ext` 全关；界面"高级选项"有开关（默认开）。`--no-probe` 模式下只跑 subfinder（纯被动），httpx/wafw00f/nuclei 一律不触碰目标。
+    工程处理：外部工具输出强制按 UTF-8 解码（中文标题不会崩）、Windows 下 `CREATE_NO_WINDOW` 不弹黑框、`-duc` 关闭工具自更新检查（不受 GitHub 网络影响）、nuclei v3 用 `-jsonl` 且自动回退兼容 v2；`--ext-sub-limit`（默认 3000）限制单域名子域数，防止历史垃圾子域撑爆台账（0=不限）。
 
 ## 平台配额与频率（重要）
 

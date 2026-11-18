@@ -1414,7 +1414,7 @@ class TestExternalTools(unittest.TestCase):
         cybercensus.shutil.which = lambda n: "/fake/" + n if n == which_name else None
 
         class _R(object):
-            pass
+            returncode = 0
         r = _R()
         r.stdout = stdout
         r.stderr = ""
@@ -1552,6 +1552,37 @@ class TestExternalTools(unittest.TestCase):
         calls.clear()
         e2.run_external_tools(e2.args.ext_tools)
         self.assertEqual(calls, ["subfinder", "httpx"])
+
+    def test_run_ext_uses_utf8_and_no_window(self):
+        captured = {}
+        orig = cybercensus.subprocess.run
+
+        class _R(object):
+            stdout = ""
+
+        def fake_run(cmd, **kw):
+            captured.update(kw)
+            return _R()
+        cybercensus.subprocess.run = fake_run
+        self.addCleanup(cybercensus.subprocess.__setattr__, "run", orig)
+        cybercensus._run_ext(["x.exe"], 5)
+        self.assertEqual(captured.get("encoding"), "utf-8")
+        self.assertEqual(captured.get("errors"), "replace")
+        if os.name == "nt":
+            self.assertEqual(captured.get("creationflags"), 0x08000000)
+
+    def test_subfinder_cap_per_domain(self):
+        e = cybercensus.Engine(self._ns(ext_sub_limit=2))
+        e.domains = {"x.com"}
+        orig = {n: getattr(cybercensus, n) for n in
+                ("ext_available", "run_subfinder")}
+        cybercensus.ext_available = lambda: {"subfinder": "p"}
+        cybercensus.run_subfinder = lambda d, timeout=300: {
+            "a.x.com", "b.x.com", "c.x.com"}
+        for n, f in orig.items():
+            self.addCleanup(cybercensus.__setattr__, n, f)
+        e.run_external_tools()
+        self.assertEqual(sorted(e.assets), [("a.x.com", ""), ("b.x.com", "")])
 
     def test_no_tools_installed_is_noop(self):
         e = cybercensus.Engine(self._ns())

@@ -2892,9 +2892,14 @@ class Engine(object):
         # 1) subfinder：多源被动子域枚举（不触碰目标）
         if "subfinder" in tools:
             total = 0
+            limit = int(getattr(self.args, "ext_sub_limit", 3000) or 0)
             for d in [x for x in sorted(self.domains) if x][:10]:
-                subs = run_subfinder(d)
-                for h in sorted(subs):
+                subs = sorted(run_subfinder(d))
+                if limit and len(subs) > limit:
+                    log("  subfinder %s: %d 条，超过单域上限 %d，按字母序截断"
+                        "（--ext-sub-limit 可调，0=不限）" % (d, len(subs), limit), "!")
+                    subs = subs[:limit]
+                for h in subs:
                     self.add_asset(h, None, None, source="ext:subfinder")
                 total += len(subs)
                 if subs:
@@ -3640,14 +3645,23 @@ def ext_available():
     return out
 
 
+def _run_ext(cmd, timeout):
+    """调用外部工具：强制 UTF-8（中文标题/输出不会因 GBK 解码崩溃），
+    Windows 下不弹控制台窗口（GUI 打包后调用时不闪黑框）。"""
+    kw = dict(capture_output=True, text=True, encoding="utf-8",
+              errors="replace", timeout=timeout)
+    if os.name == "nt":
+        kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    return subprocess.run(cmd, **kw)
+
+
 def run_subfinder(domain, timeout=300):
     """subfinder 大字典/多源被动子域（-silent 每行一个主机名）。"""
     binp = shutil.which("subfinder")
     if not binp:
         return set()
     try:
-        r = subprocess.run([binp, "-d", domain, "-silent"],
-                           capture_output=True, text=True, timeout=timeout)
+        r = _run_ext([binp, "-d", domain, "-silent", "-duc"], timeout)
         subs = set()
         for line in (r.stdout or "").splitlines():
             h = line.strip().lower().rstrip(".")
@@ -3669,10 +3683,10 @@ def run_httpx(hosts, timeout=600):
         fd, tmp = tempfile.mkstemp(suffix=".txt", text=True)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write("\n".join(hosts))
-        r = subprocess.run(
-            [binp, "-l", tmp, "-silent", "-json", "-title", "-tech-detect",
+        r = _run_ext(
+            [binp, "-l", tmp, "-silent", "-json", "-duc", "-title", "-tech-detect",
              "-web-server", "-status-code", "-timeout", "8"],
-            capture_output=True, text=True, timeout=timeout)
+            timeout)
         out = []
         for line in (r.stdout or "").splitlines():
             line = line.strip()
@@ -3711,8 +3725,7 @@ def run_wafw00f(url, timeout=120):
     if not binp:
         return ""
     try:
-        r = subprocess.run([binp, "-u", url, "-f", "json"],
-                           capture_output=True, text=True, timeout=timeout)
+        r = _run_ext([binp, "-u", url, "-f", "json"], timeout)
         data = json.loads(r.stdout or "{}")
         items = data if isinstance(data, list) else [data]
         for it in items:
@@ -3734,10 +3747,14 @@ def run_nuclei(urls, timeout=1200, severity="critical,high,medium"):
         fd, tmp = tempfile.mkstemp(suffix=".txt", text=True)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write("\n".join(urls))
-        r = subprocess.run(
-            [binp, "-l", tmp, "-json", "-silent", "-severity", severity,
-             "-timeout", "8", "-retries", "1"],
-            capture_output=True, text=True, timeout=timeout)
+        cmd = [binp, "-l", tmp, "-jsonl", "-silent", "-duc", "-severity", severity,
+               "-timeout", "8", "-retries", "1"]
+        r = _run_ext(cmd, timeout)
+        # nuclei v2 没有 -jsonl（v3 才有）：按输出自动回退到 -json
+        if r.returncode != 0 and "flag provided but not defined" in (
+                (r.stdout or "") + (r.stderr or "")):
+            cmd[3] = "-json"
+            r = _run_ext(cmd, timeout)
         hits = []
         for line in (r.stdout or "").splitlines():
             line = line.strip()
@@ -3971,6 +3988,8 @@ def build_parser():
                         "（默认全部已安装的都调用；nuclei 仍需 --active）")
     g.add_argument("--no-ext", action="store_true",
                    help="不调用任何外部工具（默认自动探测并调用）")
+    g.add_argument("--ext-sub-limit", type=int, default=3000, dest="ext_sub_limit",
+                   help="subfinder 单域名子域上限（默认3000，0=不限；防止历史垃圾子域撑爆台账）")
 
     g = p.add_argument_group("多平台聚合（FOFA / 0.zone / Hunter鹰图 / DayDayMap）")
     g.add_argument("--providers", action="append", default=None,
