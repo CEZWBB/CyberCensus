@@ -995,5 +995,62 @@ class TestRefMining(unittest.TestCase):
         self.assertTrue(e._verify_candidate_domain("", "sub.x.com"))
 
 
+# ----------------------------------------------------------------------------
+# subfinder/OneForAll 清单移植：CertSpotter / Shodan InternetDB / RapidDNS同IP
+# ----------------------------------------------------------------------------
+class TestNewReconSources(unittest.TestCase):
+    def _patch_http(self, fake):
+        orig = cybercensus.http_get
+        cybercensus.http_get = fake
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+
+    def test_certspotter_parse(self):
+        data = [{"dns_names": ["www.x.com", "*.wild.x.com", "other.com"]},
+                {"dns_names": ["mail.x.com"]}]
+        self._patch_http(lambda url, **kw: json.dumps(data))
+        subs = cybercensus.certspotter_subdomains("x.com")
+        self.assertEqual(subs, {"www.x.com", "wild.x.com", "mail.x.com"})
+
+    def test_certspotter_fail_empty(self):
+        self._patch_http(lambda url, **kw: (_ for _ in ()).throw(OSError("down")))
+        self.assertEqual(cybercensus.certspotter_subdomains("x.com"), set())
+
+    def test_internetdb(self):
+        data = {"ports": [443, 8080, 22], "hostnames": ["www.x.com."],
+                "cpes": ["cpe:/a:nginx"], "vulns": ["CVE-2021-44228"]}
+        self._patch_http(lambda url, **kw: json.dumps(data))
+        idb = cybercensus.shodan_internetdb("1.2.3.4")
+        self.assertEqual(idb["ports"], [443, 8080, 22])
+        self.assertEqual(idb["vulns"], ["CVE-2021-44228"])
+
+    def test_internetdb_no_data_is_none(self):
+        # InternetDB 对无数据 IP 返回 404 → 函数应返回 None 而不是崩溃
+        import urllib.error
+        self._patch_http(lambda url, **kw: (_ for _ in ()).throw(
+            urllib.error.HTTPError("u", 404, "nf", {}, None)))
+        self.assertIsNone(cybercensus.shodan_internetdb("1.2.3.4"))
+
+    def test_sameip_parse_and_filter(self):
+        html = '<td><a href="/domain/www.x.com">www.x.com</a></td> rapiddns.io junk'
+        self._patch_http(lambda url, **kw: html)
+        hosts = cybercensus.rapiddns_sameip("1.2.3.4")
+        self.assertIn("www.x.com", hosts)
+        self.assertNotIn("rapiddns.io", hosts)
+
+    def test_gather_sources_parallel(self):
+        """并行源收集：各源结果正确归位，单源失败不影响整体。"""
+        def fake(url, **kw):
+            if "certspotter" in url:
+                return json.dumps([{"dns_names": ["cs.x.com"]}])
+            if "rapiddns" in url:
+                return "nothing useful"
+            raise OSError("down")
+        self._patch_http(fake)
+        srcs = cybercensus._gather_subdomain_sources("x.com", timeout=10)
+        self.assertIn("certspotter", srcs)
+        self.assertIn("cs.x.com", srcs["certspotter"])
+        self.assertEqual(srcs["hackertarget"], {})   # 失败源返回空而不崩溃
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -866,6 +866,89 @@ def bing_site_subdomains(domain):
     return out
 
 
+def certspotter_subdomains(domain, timeout=25):
+    """CertSpotter CT 日志子域（免费无 Key）。
+
+    与 crt.sh 互补——实测能挖到 crt.sh 组织名查询漏掉的证书
+    （如只出现在 SAN 列表里的移动端子站）。
+    """
+    subs = set()
+    try:
+        url = ("https://api.certspotter.com/v1/issuances?domain=%s"
+               "&include_subdomains=true&expand=dns_names" % urllib.parse.quote(domain))
+        data = json.loads(http_get(url, timeout=timeout, retries=1))
+        for e in data or []:
+            for n in e.get("dns_names", []) or []:
+                n = str(n).strip().lower().lstrip("*.")
+                if n == domain or n.endswith("." + domain):
+                    subs.add(n)
+    except Exception:
+        pass
+    return subs
+
+
+def shodan_internetdb(ip, timeout=15):
+    """Shodan InternetDB 免费情报（无 Key）：历史扫描的端口/主机名/CPE/CVE。
+
+    端口是 Shodan 历史扫描结果（被动测绘，非实时——需人工复核）；
+    该 IP 无数据时返回 None（404 语义）。
+    """
+    try:
+        txt = http_get("https://internetdb.shodan.io/%s" % ip,
+                       timeout=timeout, retries=1)
+        data = json.loads(txt)
+        if isinstance(data, dict) and data.get("ports"):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def rapiddns_sameip(ip, timeout=20):
+    """RapidDNS 同 IP 域名反查（免费 HTML）——hackertarget 反查的互补源。
+
+    返回该 IP 历史解析过的全部域名（含共享托管的邻居，归属交由分级判定）。
+    """
+    hosts = set()
+    try:
+        html = http_get("https://rapiddns.io/s/%s" % ip, timeout=timeout, retries=1)
+        for m in re.finditer(r"([a-zA-Z0-9][a-zA-Z0-9\-\.]{1,62}\.(?:com|net|org|cn|gov|edu|info|xyz|top|vip|cc|hk|mo|tw)(?:\.cn)?)", html):
+            h = m.group(1).lower()
+            if root_domain(h) == "rapiddns.io":
+                continue
+            hosts.add(h)
+    except Exception:
+        pass
+    return hosts
+
+
+def _gather_subdomain_sources(domain, timeout=25):
+    """并行跑全部无 Key 被动子域源（平台间互不阻塞，任一失败不影响其它）。
+
+    返回 {源名: 结果}；hackertarget 返回 dict(host->ip)，其余返回 set(host)。
+    """
+    jobs = (
+        ("crt.sh", lambda: crt_subdomains(domain, timeout=timeout)),
+        ("hackertarget", lambda: hackertarget_hostsearch(domain, timeout=timeout)),
+        ("rapiddns", lambda: rapiddns_subdomains(domain, timeout=timeout)),
+        ("certspotter", lambda: certspotter_subdomains(domain, timeout=timeout)),
+        ("wayback历史", lambda: wayback_subdomains(domain, timeout=timeout)),
+        ("OTX被动DNS", lambda: otx_subdomains(domain, timeout=timeout)),
+        ("urlscan历史", lambda: urlscan_subdomains(domain, timeout=timeout)),
+        ("搜索引擎site:", lambda: bing_site_subdomains(domain)),
+    )
+    out = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {ex.submit(fn): name for name, fn in jobs}
+        for f in as_completed(futs):
+            name = futs[f]
+            try:
+                out[name] = f.result()
+            except Exception:
+                out[name] = set() if name != "hackertarget" else {}
+    return out
+
+
 def bing_exact_hosts(query):
     """搜索引擎精确短语查询 → 命中的站点主机列表（滤掉搜索引擎/聚合站）。
 
@@ -1439,30 +1522,20 @@ class Engine(object):
                     s = self.add_asset(h, None, None, source="crt:org")
                     s.ip = self.sub_map.get(h, "")
 
-        # 域名 -> 子域名（多被动源聚合：证书 / 被动DNS / 历史快照 / 搜索引擎）
+        # 域名 -> 子域名（8 个免费被动源并行聚合）
         for d in list(dict.fromkeys(domains)):
             log("子域名收集: %s" % d)
-            subs = crt_subdomains(d)
-            log("  crt.sh 得到 %d 个" % len(subs))
-            ht = hackertarget_hostsearch(d)
-            if ht:
-                log("  hackertarget 得到 %d 个" % len(ht))
-            rd = rapiddns_subdomains(d)
-            if rd:
-                log("  rapiddns 得到 %d 个" % len(rd))
-            wb = wayback_subdomains(d)
-            if wb:
-                log("  wayback历史 得到 %d 个" % len(wb))
-            ox = otx_subdomains(d)
-            if ox:
-                log("  OTX被动DNS 得到 %d 个" % len(ox))
-            us = urlscan_subdomains(d)
-            if us:
-                log("  urlscan历史 得到 %d 个" % len(us))
-            bs = bing_site_subdomains(d)
-            if bs:
-                log("  搜索引擎site: 得到 %d 个" % len(bs))
-            allsubs = (set(subs) | set(ht.keys()) | set(rd) | wb | ox | us | bs)
+            srcs = _gather_subdomain_sources(d, timeout=self.args.timeout)
+            ht = {}
+            allsubs = set()
+            for name, items in srcs.items():
+                if items:
+                    log("  %s 得到 %d 个" % (name, len(items)))
+                if isinstance(items, dict):
+                    ht.update(items)
+                    allsubs |= set(items)
+                else:
+                    allsubs |= set(items)
             allsubs.add(d)
             for h in allsubs:
                 ip = ht.get(h, "")
@@ -1528,9 +1601,9 @@ class Engine(object):
                         log("  信用代码验证通过: %s" % h, "+")
                         break
 
-        # IP 反查
-        all_ips = set(self.input_ips)
-        for ip in list(all_ips):
+        # IP 反查（输入 IP ∪ 锚点域名 IP——目标自己的 IP 也要做反查/情报）
+        all_ips = set(self.input_ips) | set(self.anchor["ips"])
+        for ip in sorted(all_ips):
             log("IP 归属/反查: %s" % ip)
             info = ip_info(ip)
             if info:
@@ -1551,6 +1624,32 @@ class Engine(object):
             for h in rev:
                 a = self.add_asset(h, None, None, source="reverse-ip:%s" % ip)
                 a.ip = ip
+            # RapidDNS 同 IP 反查（hackertarget 反查的互补源，含历史解析）
+            same = rapiddns_sameip(ip)
+            if same:
+                log("  RapidDNS同IP 得到 %d 个域名" % len(same), "+")
+                for h in same:
+                    a = self.add_asset(h, None, None, source="rapiddns:sameip:%s" % ip)
+                    a.ip = ip
+            # Shodan InternetDB 免费情报：历史扫描的端口/主机名/CPE/CVE（无 Key）
+            idb = shodan_internetdb(ip)
+            if idb:
+                for h in idb.get("hostnames", []) or []:
+                    h = str(h).strip().lower().rstrip(".")
+                    if h and h not in self.sub_map:
+                        self.sub_map[h] = ip
+                        self.add_asset(h, None, None, source="inetdb:%s" % ip, ip=ip)
+                for p in idb.get("ports", []) or []:
+                    scheme = "https" if p in (443, 8443, 9443) else "http"
+                    self.add_asset(ip, p,
+                                   scheme if is_web_port(p) else None,
+                                   source="inetdb:%s" % ip, ip=ip)
+                self.ip_notes.setdefault(ip, {})
+                self.ip_notes[ip]["cpes"] = idb.get("cpes", [])
+                self.ip_notes[ip]["vulns"] = idb.get("vulns", [])
+                log("  InternetDB 历史: 端口 %s%s" % (
+                    ",".join(str(p) for p in sorted(idb["ports"])[:15]),
+                    (" | 漏洞记录: %s" % ", ".join(idb["vulns"][:8])) if idb.get("vulns") else ""), "!")
             prefs = bgp_prefixes(ip)
             for pf in prefs:
                 self.ip_notes.setdefault(ip, {})
