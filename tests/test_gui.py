@@ -133,13 +133,6 @@ class TestBuildArgs(unittest.TestCase):
         args = gui.build_args("standard", [], webhook="https://hook.example/x")
         self.assertEqual(args.webhook, "https://hook.example/x")
 
-    def test_ext_tools(self):
-        args = gui.build_args("standard", [])
-        self.assertFalse(args.no_ext)
-        self.assertIsNone(args.ext_tools)
-        args = gui.build_args("standard", [], ext=False)
-        self.assertTrue(args.no_ext)
-
     def test_ports_priority(self):
         args = gui.build_args("standard", [], top=5)
         self.assertEqual(args.ports_list, list(gui.cybercensus.DEFAULT_PORTS[:5]))

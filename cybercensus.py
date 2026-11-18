@@ -30,12 +30,9 @@ import json
 import os
 import random
 import re
-import shutil
 import socket
 import ssl
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unicodedata
@@ -1347,19 +1344,6 @@ def _url_host(u):
     return m.group(1).lower().rstrip(".") if m else ""
 
 
-def _asset_url(a):
-    """按资产 scheme/端口拼出可访问的 Web URL（非 Web 资产返回空串）。"""
-    if not a or not a.host:
-        return ""
-    p = int(a.port) if a.port else None
-    scheme = a.scheme or ("https" if p in (443, 8443, 9443) else "http" if p else "")
-    if not scheme:
-        return ""
-    host = a.host if ":" not in a.host else "[%s]" % a.host
-    suffix = "" if p in (None, 80, 443) else ":%d" % p
-    return "%s://%s%s" % (scheme, host, suffix)
-
-
 def hackertarget_hostsearch(domain, timeout=20):
     res = {}
     try:
@@ -1743,8 +1727,6 @@ class Engine(object):
         self._code_candidates = set()   # 搜索摘要信用代码候选（需自验证才升级）
         self._js_urls = []              # 待扫描的外部 JS 地址（JSFinder 思路）
         self.js_secrets = []            # JS 敏感信息 [(url, 类型), ...]
-        self.ext_hits = []              # 外部工具 nuclei 命中 [(模板, 级别, 名称, 位置), ...]
-        self.ext_used = {}              # 本轮实际调用的外部工具 {名称: 路径}
         self.rejected = []        # 被剔除的资产（含原因）
 
     # ---- 资产登记 ----
@@ -2861,122 +2843,6 @@ class Engine(object):
             a.tech = (a.tech + "," if a.tech else "") + "WAF:%s" % waf
             log("  WAF识别: %s → %s" % (a.host, waf), "!")
 
-    # ---- 外部引擎联动（subfinder / httpx / wafw00f / nuclei）----
-    def run_external_tools(self, only=None):
-        """把本机已安装的外部工具当"可选引擎"调用，输出归一化后并入台账。
-
-        原则：只在工具存在时调用（未安装静默跳过，exe 仍零依赖）；
-        subfinder 纯被动；httpx / wafw00f 触碰目标，--no-probe 时跳过；
-        nuclei 属主动漏洞验证，仅 active 模式运行。
-        """
-        tools = ext_available()
-        if only:
-            if isinstance(only, str):
-                only = only.split(",")
-            want = {str(s).strip().lower() for s in only if str(s).strip()}
-            tools = {k: v for k, v in tools.items() if k in want}
-
-        missing = [n for n in EXT_BINARIES if n not in tools]
-        if not tools:
-            log("外部引擎: 未检测到 %s（跳过）。安装后本工具会自动调用。"
-                % "/".join(EXT_BINARIES), "!")
-            return
-        self.ext_used = dict(tools)
-        log("== 外部引擎联动: %s ==" % ", ".join(sorted(tools)), "#")
-        if missing:
-            log("未安装（跳过）: %s" % ", ".join(missing))
-
-        no_probe = getattr(self.args, "no_probe", False)
-        active = getattr(self.args, "active", False)
-
-        # 1) subfinder：多源被动子域枚举（不触碰目标）
-        if "subfinder" in tools:
-            total = 0
-            for d in [x for x in sorted(self.domains) if x][:10]:
-                subs = run_subfinder(d)
-                for h in sorted(subs):
-                    self.add_asset(h, None, None, source="ext:subfinder")
-                total += len(subs)
-                if subs:
-                    log("  subfinder %s: %d 个子域" % (d, len(subs)), "+")
-            log("subfinder 合计 %d 条（按域名证据自动归级）" % total)
-
-        httpx_results = []
-        # 2) httpx：批量存活探测 + 标题/技术栈/服务器（仅部分端口，避免不必要的触碰）
-        if "httpx" in tools and not no_probe:
-            hosts = []
-            for a in self.assets.values():
-                if not a.host or a.host in hosts:
-                    continue
-                if a.scheme or a.port is None or is_web_port(int(a.port)):
-                    hosts.append(a.host)
-            httpx_results = run_httpx(hosts)
-            if not httpx_results and hosts:
-                log("httpx: 无存活返回（可能在授权范围外/被拦截）")
-            for r in httpx_results:
-                u = r.get("url") or ""
-                m = re.match(r"(https?)://([^/:?#]+)(?::(\d+))?", u)
-                scheme = m.group(1) if m else None
-                host = m.group(2) if m else r.get("host", "")
-                port = int(m.group(3)) if (m and m.group(3)) else (
-                    443 if scheme == "https" else 80 if scheme == "http" else None)
-                if not host:
-                    continue
-                a = self.add_asset(host, port, scheme, source="ext:httpx")
-                if u:
-                    a.urls.add(u)
-                if r.get("status") and not a.status:
-                    a.status = r["status"]
-                if r.get("title") and not a.title:
-                    a.title = r["title"]
-                if r.get("server") and not a.server:
-                    a.server = r["server"]
-                for t in (r.get("tech") or "").split(","):
-                    t = t.strip()
-                    if t and t not in (a.tech or ""):
-                        a.tech = (a.tech + "," if a.tech else "") + t
-            log("httpx: %d 个存活 Web 资产（标题/技术栈已并入台账）" % len(httpx_results), "+")
-
-        # 3) wafw00f：WAF 精确识别（对少量 Web 入口）
-        if "wafw00f" in tools and not no_probe:
-            urls = [r["url"] for r in httpx_results if r.get("url")][:10]
-            if not urls:
-                for a in self.assets.values():
-                    if a.host and (a.scheme or (a.port and is_web_port(int(a.port)))):
-                        urls.append(_asset_url(a))
-                    if len(urls) >= 10:
-                        break
-            for u in urls:
-                waf = run_wafw00f(u)
-                if not waf:
-                    continue
-                host = _url_host(u)
-                port = 443 if u.startswith("https://") else 80
-                a = self.add_asset(host, port, "https" if port == 443 else "http",
-                                   source="ext:wafw00f")
-                self._apply_waf(a, waf)
-            if urls:
-                log("wafw00f: 已检测 %d 个入口" % len(urls))
-
-        # 4) nuclei：模板化 POC 验证（主动，仅 --active）
-        if "nuclei" in tools:
-            if not active or no_probe:
-                log("nuclei: 属主动漏洞验证，未开启 --active，跳过。", "!")
-            else:
-                urls = [r["url"] for r in httpx_results if r.get("url")][:15]
-                if not urls:
-                    for a in self.assets.values():
-                        if a.host and (a.scheme or (a.port and is_web_port(int(a.port)))):
-                            urls.append(_asset_url(a))
-                        if len(urls) >= 15:
-                            break
-                hits = run_nuclei(urls)
-                self.ext_hits = hits
-                if hits:
-                    log("nuclei: 命中 %d 条（见报告「外部工具联动结果」）" % len(hits), "!")
-                else:
-                    log("nuclei: 未命中（模板由 nuclei 维护，本工具只收结果）")
-
     def mine_js_secrets(self, total=40, per_limit=512 * 1024):
         """JS 文件挖掘（JSFinder + FindSomething 思路）。
 
@@ -3098,8 +2964,6 @@ class Engine(object):
                 "provider_records": len(self.provider_records),
                 "counts": {k: len(v) for k, v in groups.items()},
                 "apps": self.apps,
-                "ext_tools": sorted(self.ext_used),
-                "ext_hits": self.ext_hits,
                 "risk_hints": self.risk_hints,
                 "assets": [a.to_dict() for a in rows],
                 "generated_at": ts,
@@ -3270,35 +3134,6 @@ class Engine(object):
                 L.append("| %s | %s |" % (_md(u), _md(kind)))
             L.append("")
             L.append("> 云 AccessKey/私钥泄露可能直接导致云资源失陷——**建议优先人工确认并轮换**。\n")
-
-        # ---- 外部工具联动结果 ----
-        if self.ext_used or self.ext_hits:
-            L.append("## 🔧 外部工具联动结果\n")
-            L.append("本机已安装的外部引擎由 CyberCensus 自动调度，输出已并入上方台账：\n")
-            L.append("| 工具 | 作用 | 状态 |")
-            L.append("|------|------|------|")
-            desc = {
-                "subfinder": "多源被动子域枚举",
-                "httpx": "批量存活探测（标题/技术栈/服务器）",
-                "wafw00f": "WAF 精确识别",
-                "nuclei": "模板化 POC 验证（仅 --active）",
-            }
-            for name in sorted(EXT_BINARIES):
-                if name in self.ext_used:
-                    L.append("| %s | %s | 已调用 |" % (name, desc.get(name, "")))
-                else:
-                    L.append("| %s | %s | 未安装（跳过） |" % (name, desc.get(name, "")))
-            L.append("")
-            if self.ext_hits:
-                L.append("### nuclei POC 命中（%d 条，需人工复核）\n" % len(self.ext_hits))
-                L.append("| 级别 | 模板 | 名称 | 位置 |")
-                L.append("|------|------|------|------|")
-                for tpl, sev, name, matched in self.ext_hits[:50]:
-                    L.append("| %s | %s | %s | %s |" % (
-                        _md(sev), _md(tpl), _md(name), _md(matched)))
-                L.append("")
-                L.append("> 模板与检测逻辑由 nuclei 官方模板库维护；命中结果请人工复核，"
-                         "误报可能的请在授权范围内验证后再处置。\n")
 
         # ---- 联系方式（页面提取） ----
         if self.contacts:
@@ -3562,30 +3397,6 @@ class Engine(object):
                 parts.append("<tr><td>%s</td><td>%s</td></tr>" % (esc(u), esc(kind)))
             parts.append("</table>")
 
-        if self.ext_used or self.ext_hits:
-            parts.append("<h2>🔧 外部工具联动结果</h2>")
-            parts.append("<table><tr><th>工具</th><th>作用</th><th>状态</th></tr>")
-            _ext_desc = {
-                "subfinder": "多源被动子域枚举",
-                "httpx": "批量存活探测（标题/技术栈/服务器）",
-                "wafw00f": "WAF 精确识别",
-                "nuclei": "模板化 POC 验证（仅 --active）",
-            }
-            for name in sorted(EXT_BINARIES):
-                st = "已调用" if name in self.ext_used else "未安装（跳过）"
-                parts.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>"
-                             % (esc(name), esc(_ext_desc.get(name, "")), esc(st)))
-            parts.append("</table>")
-            if self.ext_hits:
-                parts.append("<h3>nuclei POC 命中（%d 条，需人工复核）</h3>"
-                             % len(self.ext_hits))
-                parts.append("<table><tr><th>级别</th><th>模板</th>"
-                             "<th>名称</th><th>位置</th></tr>")
-                for tpl, sev, name, matched in self.ext_hits[:50]:
-                    parts.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-                                 % (esc(sev), esc(tpl), esc(name), esc(matched)))
-                parts.append("</table>")
-
         if self.contacts:
             parts.append("<h2>联系方式（页面/摘要提取）</h2><p>%s</p>"
                          % " ".join("<code>%s</code>" % esc(e) for e in sorted(self.contacts)))
@@ -3608,161 +3419,6 @@ class Engine(object):
                      "强证据：备案号 / 证书O= / 统一社会信用代码 / 已知主域名子域。</p>")
         parts.append("</body></html>")
         return "\n".join(parts)
-
-
-# ----------------------------------------------------------------------------
-# 外部工具联动（subfinder / httpx / wafw00f / nuclei）
-#
-# 设计：只做"调度 + 输出归一化"，不做模板维护、不做大字典——
-#   · subfinder：大字典子域（我们的小字典互补）
-#   · httpx：存活探测 + 标题 + 技术栈（批量、并发高）
-#   · wafw00f：WAF 精确识别（我们的响应头指纹互补）
-#   · nuclei：POC 模板验证（模板体系由 nuclei 维护，我们只收结果）
-# 工具未安装则静默跳过，exe 仍保持零依赖自包含。
-# ----------------------------------------------------------------------------
-EXT_BINARIES = {
-    "subfinder": ("subfinder",),
-    "httpx": ("httpx",),
-    "wafw00f": ("wafw00f",),
-    "nuclei": ("nuclei",),
-}
-
-
-def ext_available():
-    """探测本机已安装的外部工具：{名称: 可执行路径}。"""
-    out = {}
-    for name, cands in EXT_BINARIES.items():
-        for c in cands:
-            p = shutil.which(c)
-            if p:
-                out[name] = p
-                break
-    return out
-
-
-def run_subfinder(domain, timeout=300):
-    """subfinder 大字典/多源被动子域（-silent 每行一个主机名）。"""
-    binp = shutil.which("subfinder")
-    if not binp:
-        return set()
-    try:
-        r = subprocess.run([binp, "-d", domain, "-silent"],
-                           capture_output=True, text=True, timeout=timeout)
-        subs = set()
-        for line in (r.stdout or "").splitlines():
-            h = line.strip().lower().rstrip(".")
-            if h and (h == domain or h.endswith("." + domain)):
-                subs.add(h)
-        return subs
-    except Exception:
-        return set()
-
-
-def run_httpx(hosts, timeout=600):
-    """httpx 批量存活探测（-json 每行一条）。返回 [{url,host,title,tech,server,status}]。"""
-    binp = shutil.which("httpx")
-    hosts = [h for h in hosts if h][:300]
-    if not binp or not hosts:
-        return []
-    tmp = ""
-    try:
-        fd, tmp = tempfile.mkstemp(suffix=".txt", text=True)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(hosts))
-        r = subprocess.run(
-            [binp, "-l", tmp, "-silent", "-json", "-title", "-tech-detect",
-             "-web-server", "-status-code", "-timeout", "8"],
-            capture_output=True, text=True, timeout=timeout)
-        out = []
-        for line in (r.stdout or "").splitlines():
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            url = str(d.get("url") or "")
-            host = _url_host(url) or str(d.get("input") or "").lower()
-            if not host:
-                continue
-            tech = d.get("tech") or []
-            out.append({
-                "url": url, "host": host,
-                "title": str(d.get("title") or ""),
-                "tech": ",".join(tech) if isinstance(tech, list) else str(tech or ""),
-                "server": str(d.get("webserver") or ""),
-                "status": str(d.get("status_code") or ""),
-            })
-        return out
-    except Exception:
-        return []
-    finally:
-        try:
-            if tmp:
-                os.unlink(tmp)
-        except Exception:
-            pass
-
-
-def run_wafw00f(url, timeout=120):
-    """wafw00f 精确 WAF 识别（-f json）。返回 WAF 名称或空串。"""
-    binp = shutil.which("wafw00f")
-    if not binp:
-        return ""
-    try:
-        r = subprocess.run([binp, "-u", url, "-f", "json"],
-                           capture_output=True, text=True, timeout=timeout)
-        data = json.loads(r.stdout or "{}")
-        items = data if isinstance(data, list) else [data]
-        for it in items:
-            if isinstance(it, dict) and it.get("detected"):
-                return str(it.get("firewall") or "")
-    except Exception:
-        pass
-    return ""
-
-
-def run_nuclei(urls, timeout=1200, severity="critical,high,medium"):
-    """nuclei 模板化 POC 验证（-json 每行一条）。返回 [{template,severity,name,matched}]。"""
-    binp = shutil.which("nuclei")
-    urls = [u for u in urls if u][:15]
-    if not binp or not urls:
-        return []
-    tmp = ""
-    try:
-        fd, tmp = tempfile.mkstemp(suffix=".txt", text=True)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(urls))
-        r = subprocess.run(
-            [binp, "-l", tmp, "-json", "-silent", "-severity", severity,
-             "-timeout", "8", "-retries", "1"],
-            capture_output=True, text=True, timeout=timeout)
-        hits = []
-        for line in (r.stdout or "").splitlines():
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            info = d.get("info") or {}
-            hits.append({
-                "template": str(d.get("template-id") or ""),
-                "severity": str(info.get("severity") or ""),
-                "name": str(info.get("name") or ""),
-                "matched": str(d.get("matched-at") or d.get("host") or ""),
-            })
-        return hits
-    except Exception:
-        return []
-    finally:
-        try:
-            if tmp:
-                os.unlink(tmp)
-        except Exception:
-            pass
 
 
 def send_webhook(url, text, timeout=10):
@@ -3965,13 +3621,6 @@ def build_parser():
     p.add_argument("--yes", action="store_true", help="跳过主动扫描的授权确认")
     p.add_argument("--quiet", action="store_true", help="少输出")
 
-    g = p.add_argument_group("外部引擎联动（本机已安装才调用，未安装自动跳过）")
-    g.add_argument("--ext-tools", default=None, dest="ext_tools",
-                   help="只调用指定外部工具，逗号分隔：subfinder,httpx,wafw00f,nuclei"
-                        "（默认全部已安装的都调用；nuclei 仍需 --active）")
-    g.add_argument("--no-ext", action="store_true",
-                   help="不调用任何外部工具（默认自动探测并调用）")
-
     g = p.add_argument_group("多平台聚合（FOFA / 0.zone / Hunter鹰图 / DayDayMap）")
     g.add_argument("--providers", action="append", default=None,
                    help="只使用指定平台，可多次：fofa / zerozone / hunter / daydaymap")
@@ -4042,9 +3691,6 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         if not args.no_providers:
             eng.collect_providers()
             eng.merge_providers()
-    # 外部引擎联动（本机装了就调：subfinder / httpx / wafw00f / nuclei）
-    if not _stopped() and not getattr(args, "no_ext", False):
-        eng.run_external_tools(getattr(args, "ext_tools", None))
     if not _stopped():
         if args.active:
             eng.scan_active()

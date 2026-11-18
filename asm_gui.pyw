@@ -119,14 +119,12 @@ def parse_targets(text):
 def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
-               formats=None, sensitive=None, probe_interval=0.0, webhook="",
-               ext=True):
+               formats=None, sensitive=None, probe_interval=0.0, webhook=""):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
     formats: 输出格式列表（"md"/"csv"/"json" 的子集），空=全部
     sensitive: 敏感路径探测（None=跟随模式：active 开，其它关）
-    ext: 调用本机已安装的外部工具（subfinder/httpx/wafw00f/nuclei）
     """
     active = (mode == "active")
     if sensitive is None:
@@ -161,8 +159,6 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         config=config,
         debug_provider=bool(debug_provider),
         webhook=webhook or "",
-        ext_tools=None,
-        no_ext=not bool(ext),
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
@@ -513,11 +509,6 @@ class App(ctk.CTk):
                       variable=self.var_sensitive
                       ).grid(row=3, column=0, columnspan=3, sticky="w", padx=(14, 0), pady=2)
 
-        self.var_ext = ctk.BooleanVar(value=True)
-        ctk.CTkSwitch(f, text="调用本机外部工具(subfinder/httpx/wafw00f/nuclei)",
-                      variable=self.var_ext
-                      ).grid(row=3, column=3, columnspan=3, sticky="w", padx=(14, 0), pady=2)
-
         ctk.CTkLabel(f, text="告警Webhook").grid(row=4, column=0, sticky="e",
                                                  padx=(14, 4), pady=6)
         self.var_webhook = ctk.StringVar(value="")
@@ -719,7 +710,6 @@ class App(ctk.CTk):
             sensitive=self.var_sensitive.get(),
             probe_interval=0.0,
             webhook=self.var_webhook.get().strip(),
-            ext=self.var_ext.get(),
         )
         self._last_out_dir = args.out
 
