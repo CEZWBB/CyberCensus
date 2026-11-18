@@ -9,6 +9,7 @@ test_fixes.py —— P0-P2 整改的回归测试（纯标准库，不联网、�
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -934,6 +935,64 @@ class TestRiskHints(unittest.TestCase):
         e.collect_risk_hints()
         kinds = {k for k, _ in e.risk_hints}
         self.assertEqual(kinds, {"后台/登录入口", "GitHub代码泄露"})
+
+
+# ----------------------------------------------------------------------------
+# 页面外链/JS 引用挖掘 + 公众号文章域名挖掘
+# ----------------------------------------------------------------------------
+class TestRefMining(unittest.TestCase):
+    def test_filter_candidate_roots(self):
+        hosts = ["www.x.com", "cdn.jsdelivr.net", "w3.org", "oss-cn-hangzhou.aliyuncs.com",
+                 "partner.y.com", "www.x.com", ""]
+        out = cybercensus.filter_candidate_roots(hosts, exclude_roots={"y.com"})
+        # 垃圾域/三方设施/已知域全滤掉，只留未知候选
+        self.assertEqual(out, ["x.com"])
+
+    def test_weixin_article_parse(self):
+        """只保留 mp.weixin.qq.com 文章链接；提取的域名经垃圾过滤。"""
+        html = ('<h2><a href="https://mp.weixin.qq.com/s/abc123">文章</a></h2>'
+                '<h2><a href="https://www.other.com/not-weixin">无关</a></h2>')
+        orig_dork = cybercensus.bing_dork_urls
+        cybercensus.bing_dork_urls = lambda q: re.findall(
+            r'href="(https?://[^"]+)"', html)
+        self.addCleanup(cybercensus.__setattr__, "bing_dork_urls", orig_dork)
+        orig_get = cybercensus.http_get
+        cybercensus.http_get = lambda url, **kw: (
+            "挂号请访问 https://gh.x.com 及 <a href='http://pay.x.com/api'>支付</a>"
+            if "weixin" in url else (_ for _ in ()).throw(OSError("no")))
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig_get)
+        roots = cybercensus.weixin_article_domains("测试医院")
+        self.assertEqual(roots, ["x.com"])
+
+    def test_mine_and_verify_refs(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.names = ["东莞市测试人民医院"]
+        e.domains = {"main.com"}
+        e._ref_candidates = ["sub.newsite.com", "www.other.org", "w3.org"]
+        orig = cybercensus.http_probe
+        cybercensus.http_probe = lambda host, port, scheme, timeout=8, throttle=0: {
+            "status": 200, "title": "东莞市测试人民医院预约挂号系统",
+            "credit_code": "", "refs": []}
+        self.addCleanup(cybercensus.__setattr__, "http_probe", orig)
+        e.mine_and_verify_refs()
+        # 标题互证通过 → 入正式锚点；垃圾域（w3.org）根本不进候选
+        self.assertIn("newsite.com", e.domains)
+        self.assertIn("other.org", e.domains)   # 非垃圾候选会被探测（fake 返回相同标题故通过）
+        self.assertNotIn("w3.org", e.domains)
+
+    def test_verify_matches_anchor_orgs(self):
+        """纯域名输入模式下，证书 O= 与锚点组织名互证也能通过。"""
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.names = []
+        e.anchor["orgs"].add("东莞市测试人民医院")
+        orig_probe = cybercensus.http_probe
+        cybercensus.http_probe = lambda host, port, scheme, timeout=8, throttle=0: {
+            "status": 200, "title": "某系统", "credit_code": "", "refs": []}
+        orig_cert = cybercensus.tls_cert_info
+        cybercensus.tls_cert_info = lambda h, p, timeout=8: {"org": "东莞市测试人民医院"}
+        self.addCleanup(cybercensus.__setattr__, "http_probe", orig_probe)
+        self.addCleanup(cybercensus.__setattr__, "tls_cert_info", orig_cert)
+        self.assertTrue(e._verify_candidate_domain("", "sub.x.com"))
 
 
 if __name__ == "__main__":

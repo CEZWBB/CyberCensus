@@ -336,7 +336,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
 
     out = {"url": url, "status": "", "title": "", "server": "",
            "powered": "", "beian": "", "analytics": "", "favicon": "",
-           "tech": "", "body_len": 0, "credit_code": ""}
+           "tech": "", "body_len": 0, "credit_code": "", "refs": []}
     body = ""
     status = ""
     hdrs = {}
@@ -372,6 +372,8 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     if mb:
         out["beian"] = mb.group(1)
     out["credit_code"] = extract_credit_code(body)   # 页脚常印统一社会信用代码
+    # 页面外链/JS 引用的域名（文档 5.2 前端深挖金矿）：候选资产线索
+    out["refs"] = [m.group(1) for m in _DOMAIN_IN_TEXT_RE.finditer(body)]
 
     for name, pat in ANALYTICS_PATTERNS:
         ma = pat.search(body)
@@ -675,10 +677,55 @@ SEARCH_JUNK_ROOTS = frozenset((
     "alipay.com", "amap.com", "bdimg.com", "bdstatic.com", "bdcdn.network",
 ))
 
+# 注意：不排除斜杠前缀——URL 形式（https://gh.x.com）的域名引用必须能提取
 _DOMAIN_IN_TEXT_RE = re.compile(
-    r"(?<![\w.\-/])((?:[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}\.)+"
+    r"(?<![\w.\-])((?:[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}\.)+"
     r"(?:com|net|org|cn|gov|edu|info|xyz|top|vip|cc|hk|mo|tw)(?:\.cn)?)"
     r"(?![\w.\-])")
+
+# 页面正文/JS 里出现的技术域/公共设施域：外链挖掘时排除（不作为候选资产）
+PAGE_JUNK_ROOTS = SEARCH_JUNK_ROOTS | frozenset((
+    # Web 标准 / 前端 CDN / 字体图标库
+    "w3.org", "schema.org", "jsdelivr.net", "unpkg.com", "bootcdn.net",
+    "staticfile.org", "jquery.com", "bootstrapcdn.com", "googleapis.com",
+    "gstatic.com", "cloudflare.com", "cdnjs.com", "fontawesome.com",
+    "vuejs.org", "reactjs.org", "npmjs.com", "gulpjs.com", "echarts.baidu.com",
+    # 开发/文档/工具
+    "github.io", "gitlab.com", "gitee.com", "stackoverflow.com", "runoob.com",
+    "w3school.com.cn", "mdn.mozilla.org", "apache.org", "nginx.org",
+    "php.net", "python.org", "mysql.com", "redis.io", "docker.com",
+    # 邮件/短信/地图/支付/统计等第三方服务
+    "mail.qq.com", "exmail.qq.com", "work.weixin.qq.com", "dingtalk.com",
+    "taobao.com", "tmall.com", "alipay.com", "tenpay.com", "unionpay.com",
+    "map.baidu.com", "amap.com", "qqmap.com", "jiathis.com", "bshare.cn",
+    "umeng.com", "growingio.com", "sensors.com", "matomo.org", "hotjar.com",
+    # 公众号/新媒体平台本身（文章来源域不是目标资产）
+    "mp.weixin.qq.com", "weixin.qq.com", "mp.weixin.com",
+))
+
+
+def filter_candidate_roots(hosts, exclude_roots=()):
+    """从页面/文章正文提取的域名中筛出候选根域名：滤垃圾域/三方设施/已知域。
+
+    返回保序去重的根域名列表（候选仍需 _verify_candidate_domain 互证才入锚点）。
+    """
+    out, seen = [], set()
+    for h in hosts or []:
+        h = (h or "").lower().rstrip(".")
+        if not h or "_" in h or h in seen:
+            continue
+        root = root_domain(h)
+        if not root or root in seen:
+            continue
+        if root in PAGE_JUNK_ROOTS or h in PAGE_JUNK_ROOTS:
+            continue
+        if is_third_party_infra(root):
+            continue
+        if root in exclude_roots:
+            continue
+        seen.add(root)
+        out.append(root)
+    return out
 
 
 def _strip_tags(html):
@@ -846,6 +893,20 @@ def bing_beian_search(beian):
     能找到所有底部印着这个号的站点（含平台未收录的），误报极低。
     """
     return bing_exact_hosts('"%s"' % beian)
+
+
+def weixin_article_domains(name, max_articles=3):
+    """搜索引擎找公众号文章（site:mp.weixin.qq.com）并提取文中外部域名。"""
+    urls = [u for u in bing_dork_urls('site:mp.weixin.qq.com "%s"' % name)
+            if _url_host(u) == "mp.weixin.qq.com"][:max_articles]
+    domains = []
+    for u in urls:
+        try:
+            body = http_get(u, timeout=12, retries=0, max_bytes=512 * 1024)
+            domains.extend(m.group(1) for m in _DOMAIN_IN_TEXT_RE.finditer(body))
+        except Exception:
+            continue
+    return filter_candidate_roots(domains)
 
 
 def bing_dork_urls(query):
@@ -1184,6 +1245,7 @@ class Engine(object):
         self.provider_records = []
         self.provider_stats = {}
         self.risk_hints = []      # 搜索引擎情报线索 [(类别, url), ...]
+        self._ref_candidates = [] # 页面外链/JS 引用的域名（待互证候选）
         self.rejected = []        # 被剔除的资产（含原因）
 
     # ---- 资产登记 ----
@@ -1253,14 +1315,18 @@ class Engine(object):
                 log("候选域名均未通过验证（标题/证书与主体名不符），未加入锚点。", "!")
 
     def _verify_candidate_domain(self, name, dom):
-        """探测候选域名首页，标题 / 证书 O= / 统一社会信用代码 任一互证即通过。"""
+        """探测候选域名首页，标题 / 证书 O= / 统一社会信用代码 任一互证即通过。
+
+        互证对象 = 主体名称 ∪ 锚点组织名（纯域名输入时也能用证书 O= 印证）。
+        """
         anchor_codes = set(self.anchor.get("credit_codes") or ())
+        names = set(self.names) | set(self.anchor.get("orgs") or ())
         for scheme, port in (("https", 443), ("http", 80)):
             info = http_probe(dom, port, scheme, timeout=self.args.timeout)
             if info.get("status") in ("", None):
                 continue
             title = info.get("title", "") or ""
-            if _org_match(name, title):
+            if any(n and _org_match(n, title) for n in names):
                 self._add_verified_domain(dom)
                 return True
             # 页面含锚点信用代码：文档 7.2 的 A 级证据，直接确认
@@ -1270,7 +1336,7 @@ class Engine(object):
             if scheme == "https":
                 cert = tls_cert_info(dom, port, timeout=self.args.timeout)
                 org = (cert or {}).get("org", "")
-                if org and _org_match(name, org):
+                if org and any(n and _org_match(n, org) for n in names):
                     self._add_verified_domain(dom)
                     return True
         return False
@@ -1330,6 +1396,8 @@ class Engine(object):
                 if a.credit_code:
                     self.anchor["credit_codes"].add(a.credit_code)
                     log("  锚点统一社会信用代码: %s" % a.credit_code, "+")
+                for ref in (info.get("refs") or []):
+                    self._ref_candidates.append(ref)
                 if a.analytics:
                     self.anchor["analytics"].add(a.analytics)
                     log("  锚点统计ID: %s" % a.analytics, "+")
@@ -1651,6 +1719,8 @@ class Engine(object):
                 a.credit_code = info.get("credit_code", "") or a.credit_code
                 a.analytics = info.get("analytics", "") or a.analytics
                 a.favicon = info.get("favicon", "") or a.favicon
+                for ref in (info.get("refs") or []):
+                    self._ref_candidates.append(ref)
                 if cert:
                     a.cert_org = cert.get("org", "")
                     a.cert_san = ",".join(cert.get("sans", [])[:20])
@@ -2096,6 +2166,48 @@ class Engine(object):
                     self.risk_hints.append((kind, u))
                 if len(self.risk_hints) > n0:
                     log("dork情报(%s): %s 命中 %d 条" % (kind, d, len(self.risk_hints) - n0), "+")
+
+    # ---- 4.8 公众号/页面外链域名挖掘（文档阶段六 + 5.2 前端深挖） ----
+    def mine_weixin_domains(self, max_articles=3):
+        """公众号文章 → 外部域名（文档阶段六）。
+
+        公众号菜单/文章常挂 H5 活动页、挂号/查询系统等独立域名，这些域名
+        往往不在主站上。文章经搜索引擎收录检索（best-effort：小单位常无
+        收录，引擎降级返回无关结果会被域名校验自然过滤，零成本跳过）。
+        候选域名仍需标题/证书/信用代码互证才入锚点。
+        """
+        if not self.names:
+            return
+        for name in self.names:
+            roots = weixin_article_domains(name, max_articles=max_articles)
+            if not roots:
+                continue
+            log("公众号文章挖掘(%s): %d 个候选域名" % (name, len(roots)))
+            for root in roots:
+                if root in self.domains:
+                    continue
+                if self._verify_candidate_domain(name, root):
+                    log("  公众号关联域名验证通过: %s" % root, "+")
+
+    def mine_and_verify_refs(self, limit=6):
+        """页面外链/JS 引用挖掘（文档 5.2 前端深挖金矿）。
+
+        探测过的每个页面正文里引用的域名（href/src/script）都可能指向
+        未公开系统。候选经垃圾域过滤后逐个互证，通过才入锚点——
+        合作伙伴/政府门户等外链在验证环节被标题/证书不符拦下。
+        """
+        exclude = set(self.domains)
+        for d in self.domains:
+            exclude.add(root_domain(d))
+        cands = filter_candidate_roots(self._ref_candidates,
+                                       exclude_roots=exclude)[:limit]
+        if not cands:
+            return
+        log("页面引用挖掘: %d 个候选根域名（外链/JS 引用）" % len(cands))
+        name = self.names[0] if self.names else ""
+        for root in cands:
+            if self._verify_candidate_domain(name, root):
+                log("  引用域名互证通过: %s" % root, "+")
 
     # ---- 5. 输出 ----
     def output(self, baseline_diff=None):
@@ -2591,6 +2703,9 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         # 搜索引擎风险情报（dork：后台入口 / GitHub 泄露，不触碰目标）
         if not getattr(args, "no_hints", False):
             eng.collect_risk_hints()
+        # 公众号文章域名挖掘（文档阶段六；需探测验证，纯被动模式跳过）
+        if not args.no_probe:
+            eng.mine_weixin_domains()
         # 多平台聚合（FOFA / 0.zone / Hunter / DayDayMap）
         if not args.no_providers:
             eng.collect_providers()
@@ -2610,6 +2725,9 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
             getattr(args, "sensitive", False) or args.active)
         if do_sens and not _stopped():
             eng.probe_sensitive(limit=getattr(args, "sensitive_limit", 200))
+    if not _stopped():
+        # 页面外链/JS 引用挖掘（锚点页 + 所有探测过的页面正文）
+        eng.mine_and_verify_refs()
     if _stopped():
         log("已请求停止：对已收集的数据做分级输出。", "!")
     eng.evaluate()
