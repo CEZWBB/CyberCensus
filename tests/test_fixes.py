@@ -1514,6 +1514,9 @@ class TestExternalTools(unittest.TestCase):
             self.addCleanup(cybercensus.__setattr__, n, f)
         e.run_external_tools()
         self.assertEqual(calls, ["subfinder"])
+        self.assertEqual(sorted(e.ext_used), ["subfinder"])
+        self.assertEqual(sorted(e.ext_detected),
+                         ["httpx", "nuclei", "subfinder", "wafw00f"])
 
     def test_nuclei_requires_active(self):
         e = cybercensus.Engine(self._ns())

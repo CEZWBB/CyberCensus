@@ -1745,6 +1745,7 @@ class Engine(object):
         self.js_secrets = []            # JS 敏感信息 [(url, 类型), ...]
         self.ext_hits = []              # 外部工具 nuclei 命中 [(模板, 级别, 名称, 位置), ...]
         self.ext_used = {}              # 本轮实际调用的外部工具 {名称: 路径}
+        self.ext_detected = set()       # 本机检测到的外部工具（含本轮未调用的）
         self.rejected = []        # 被剔除的资产（含原因）
 
     # ---- 资产登记 ----
@@ -2881,16 +2882,23 @@ class Engine(object):
             log("外部引擎: 未检测到 %s（跳过）。安装后本工具会自动调用。"
                 % "/".join(EXT_BINARIES), "!")
             return
-        self.ext_used = dict(tools)
-        log("== 外部引擎联动: %s ==" % ", ".join(sorted(tools)), "#")
+        self.ext_detected = set(tools)
+        self.ext_used = {}
+        log("== 外部引擎联动（检测到: %s）==" % ", ".join(sorted(tools)), "#")
         if missing:
             log("未安装（跳过）: %s" % ", ".join(missing))
 
         no_probe = getattr(self.args, "no_probe", False)
         active = getattr(self.args, "active", False)
+        if no_probe:
+            skipped = [n for n in ("httpx", "wafw00f", "nuclei") if n in tools]
+            if skipped:
+                log("纯被动模式：%s 需要连接目标，已跳过（被动源照常全部运行）。"
+                    % "/".join(skipped))
 
         # 1) subfinder：多源被动子域枚举（不触碰目标）
         if "subfinder" in tools:
+            self.ext_used["subfinder"] = tools["subfinder"]
             total = 0
             limit = int(getattr(self.args, "ext_sub_limit", 3000) or 0)
             for d in [x for x in sorted(self.domains) if x][:10]:
@@ -2909,6 +2917,7 @@ class Engine(object):
         httpx_results = []
         # 2) httpx：批量存活探测 + 标题/技术栈/服务器（仅部分端口，避免不必要的触碰）
         if "httpx" in tools and not no_probe:
+            self.ext_used["httpx"] = tools["httpx"]
             hosts = []
             for a in self.assets.values():
                 if not a.host or a.host in hosts:
@@ -2951,6 +2960,8 @@ class Engine(object):
                         urls.append(_asset_url(a))
                     if len(urls) >= 10:
                         break
+            if urls:
+                self.ext_used["wafw00f"] = tools["wafw00f"]
             for u in urls:
                 waf = run_wafw00f(u)
                 if not waf:
@@ -2975,6 +2986,7 @@ class Engine(object):
                             urls.append(_asset_url(a))
                         if len(urls) >= 15:
                             break
+                self.ext_used["nuclei"] = tools["nuclei"]
                 hits = run_nuclei(urls)
                 self.ext_hits = hits
                 if hits:
@@ -3104,6 +3116,7 @@ class Engine(object):
                 "counts": {k: len(v) for k, v in groups.items()},
                 "apps": self.apps,
                 "ext_tools": sorted(self.ext_used),
+                "ext_detected": sorted(self.ext_detected),
                 "ext_hits": self.ext_hits,
                 "risk_hints": self.risk_hints,
                 "assets": [a.to_dict() for a in rows],
@@ -3290,9 +3303,12 @@ class Engine(object):
             }
             for name in sorted(EXT_BINARIES):
                 if name in self.ext_used:
-                    L.append("| %s | %s | 已调用 |" % (name, desc.get(name, "")))
+                    st = "已调用"
+                elif name in self.ext_detected:
+                    st = "已安装，本轮未调用（模式限制）"
                 else:
-                    L.append("| %s | %s | 未安装（跳过） |" % (name, desc.get(name, "")))
+                    st = "未安装（跳过）"
+                L.append("| %s | %s | %s |" % (name, desc.get(name, ""), st))
             L.append("")
             if self.ext_hits:
                 L.append("### nuclei POC 命中（%d 条，需人工复核）\n" % len(self.ext_hits))
@@ -3577,7 +3593,12 @@ class Engine(object):
                 "nuclei": "模板化 POC 验证（仅 --active）",
             }
             for name in sorted(EXT_BINARIES):
-                st = "已调用" if name in self.ext_used else "未安装（跳过）"
+                if name in self.ext_used:
+                    st = "已调用"
+                elif name in self.ext_detected:
+                    st = "已安装，本轮未调用（模式限制）"
+                else:
+                    st = "未安装（跳过）"
                 parts.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>"
                              % (esc(name), esc(_ext_desc.get(name, "")), esc(st)))
             parts.append("</table>")
