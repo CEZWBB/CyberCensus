@@ -57,11 +57,34 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 # 界面模式选项 -> 流水线模式
 MODE_MAP = {"被动": "passive", "标准": "standard", "复核": "verify", "主动": "active"}
+MODE_ORDER = ["被动", "标准", "复核", "主动"]
 MODE_HINTS = {
-    "被动": "完全不触碰目标，纯第三方数据",
-    "标准": "仅探测主域名建立锚点",
-    "复核": "对疑似资产做一次 HTTP 复核",
-    "主动": "端口扫描 + Web 指纹（需授权）",
+    "被动": "不向目标发送任何请求；仅 subfinder 属于纯被动外部工具",
+    "标准": "只探测主域名建立锚点，httpx / wafw00f 参与",
+    "复核": "对疑似资产补一次 HTTP 复核（会触碰目标）",
+    "主动": "端口扫描 + Web 指纹 + 敏感路径 + nuclei（需授权）",
+}
+# 模式视觉标识：(英文代号, 主色, 悬停色, 一句话说明, 卡片能力标签)
+MODE_META = {
+    "被动": ("PASSIVE", "#22d3ee", "#67e8f9", "零触碰 · 纯第三方数据",
+             ["零触碰", "subfinder", "8 被动源"]),
+    "标准": ("STANDARD", "#38bdf8", "#7dd3fc", "锚点探测 · 默认模式",
+             ["锚点探测", "httpx", "wafw00f"]),
+    "复核": ("VERIFY", "#fbbf24", "#fcd34d", "疑似资产存活复核",
+             ["存活复核", "httpx", "WAF"]),
+    "主动": ("ACTIVE", "#f87171", "#fca5a5", "端口扫描 + 敏感路径 + nuclei",
+             ["端口扫描", "敏感路径", "nuclei"]),
+}
+# 能力矩阵：模式 -> [(能力, 是否启用), ...]
+MODE_CAPS = {
+    "被动": [("被动源", True), ("subfinder", True), ("httpx", False),
+             ("wafw00f", False), ("端口扫描", False), ("nuclei", False)],
+    "标准": [("被动源", True), ("subfinder", True), ("httpx", True),
+             ("wafw00f", True), ("端口扫描", False), ("nuclei", False)],
+    "复核": [("被动源", True), ("subfinder", True), ("httpx", True),
+             ("wafw00f", True), ("端口扫描", False), ("nuclei", False)],
+    "主动": [("被动源", True), ("subfinder", True), ("httpx", True),
+             ("wafw00f", True), ("端口扫描", True), ("nuclei", True)],
 }
 
 PLATFORM_LABELS = [
@@ -71,23 +94,27 @@ PLATFORM_LABELS = [
     ("daydaymap", "DayDayMap"),
 ]
 
-# ---- 视觉调色板（深色高级感：深底 + 微亮面板 + 清晰描边） ----
-ACCENT = "#2f81f7"
-ACCENT_HOVER = "#1f6feb"
-RED = "#e5534b"
-RED_HOVER = "#c93c37"
-GREEN = "#3fb950"
-ORANGE = "#d29922"
-GRAY = "#8b949e"
-BG = "#0a0e14"          # 窗口底色（近黑）
-PANEL = "#121821"       # 面板
-CARD = "#161d28"        # 卡片
-STROKE = "#26303d"      # 描边
-HEADER_BG = "#0d1219"   # 头栏
+# ---- 视觉系统：深空黑 + 青色霓虹（科技感） ----
+ACCENT = "#22d3ee"        # 品牌青
+ACCENT_HOVER = "#67e8f9"
+ACCENT_DIM = "#0e7490"
+RED = "#f87171"
+RED_HOVER = "#fca5a5"
+GREEN = "#34d399"
+ORANGE = "#fbbf24"
+GRAY = "#71859a"          # 次要文字
+TEXT = "#dbe7f3"          # 主文字
+BG = "#05070d"            # 窗口底色（深空黑）
+PANEL = "#090f18"         # 侧栏
+CARD = "#0d1520"          # 卡片
+CARD_HI = "#101b2a"       # 选中卡片
+STROKE = "#1b2b3d"        # 描边
+STROKE_HI = "#2b4359"     # 悬停描边
+HEADER_BG = "#070c13"     # 头栏
+MONO = "Consolas"         # 科技感等宽字体（Windows 自带）
 
 LOG_PALETTE = {
-    "dark": {"hdr": "#58a6ff", "good": "#3fb950", "warn": "#d29922", "norm": "#c9d1d9"},
-    "light": {"hdr": "#0969da", "good": "#1a7f37", "warn": "#9a6700", "norm": "#24292f"},
+    "dark": {"hdr": "#67e8f9", "good": "#34d399", "warn": "#fbbf24", "norm": "#a8bccf"},
 }
 
 
@@ -215,12 +242,20 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(APP_TITLE)
-        w, h = 1120, 740
+        w, h = 1180, 860
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2),
                                        max(0, (sh - h) // 2 - 24)))
-        self.minsize(980, 660)
+        self.minsize(1040, 700)
         self.configure(fg_color=BG)
+
+        # 字体阶梯（等宽字体营造终端/仪表盘观感）
+        self.f_brand = ctk.CTkFont(family=MONO, size=21, weight="bold")
+        self.f_mono = ctk.CTkFont(family=MONO, size=12)
+        self.f_mono_sm = ctk.CTkFont(family=MONO, size=10)
+        self.f_title = ctk.CTkFont(size=13, weight="bold")
+        self.f_body = ctk.CTkFont(size=12)
+        self._mode = "标准"
 
         self._queue = queue.Queue()
         self._worker = None
@@ -236,7 +271,9 @@ class App(ctk.CTk):
         self._build_header()
         self._build_sidebar()
         self._build_main()
+        self._build_advanced_dialog()
         self._refresh_platforms()
+        self._select_mode("标准", initial=True)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Control-Return>", lambda e: self._on_start())
         self.after(100, self._poll)
@@ -245,24 +282,40 @@ class App(ctk.CTk):
     # 品牌头栏（横贯顶部）
     # ------------------------------------------------------------------
     def _build_header(self):
-        bar = ctk.CTkFrame(self, height=58, corner_radius=0, fg_color=HEADER_BG)
+        bar = ctk.CTkFrame(self, corner_radius=0, fg_color=HEADER_BG)
         bar.grid(row=0, column=0, columnspan=2, sticky="ew")
         bar.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(bar, text="◈", font=ctk.CTkFont(size=22),
-                     text_color=ACCENT).grid(row=0, column=0, padx=(22, 8), pady=12)
-        ctk.CTkLabel(bar, text="CyberCensus", font=ctk.CTkFont(size=20, weight="bold")
-                     ).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(bar, text="互联网暴露面测绘 · 证据分级 · 低误报",
-                     text_color=GRAY, font=ctk.CTkFont(size=12)
-                     ).grid(row=0, column=2, sticky="e", padx=(0, 8))
+        ctk.CTkLabel(bar, text="◈", font=ctk.CTkFont(family=MONO, size=28, weight="bold"),
+                     text_color=ACCENT).grid(row=0, column=0, rowspan=2, padx=(24, 12),
+                                             pady=(10, 8))
+        ctk.CTkLabel(bar, text="CYBERCENSUS", font=self.f_brand, text_color=TEXT
+                     ).grid(row=0, column=1, sticky="sw", pady=(12, 0))
+        ctk.CTkLabel(bar, text="互联网暴露面测绘  //  ATTACK SURFACE INTELLIGENCE",
+                     text_color=GRAY, font=self.f_mono_sm
+                     ).grid(row=1, column=1, sticky="nw", pady=(0, 12))
+
+        ctk.CTkLabel(bar, text=" V1.0 ", font=self.f_mono_sm, text_color=ACCENT,
+                     fg_color="#0a2230", corner_radius=4, height=20, padx=6
+                     ).grid(row=0, column=2, rowspan=2, padx=(0, 12))
+
+        self.lbl_mode_tag = ctk.CTkLabel(
+            bar, text="STANDARD", font=ctk.CTkFont(family=MONO, size=11, weight="bold"),
+            text_color=ACCENT, fg_color=CARD, corner_radius=6, height=24, padx=12,
+            border_width=1, border_color=STROKE)
+        self.lbl_mode_tag.grid(row=0, column=3, rowspan=2, padx=(0, 10))
 
         # 状态胶囊
         self.var_status = ctk.StringVar(value="● 就绪")
         self.lbl_status = ctk.CTkLabel(
             bar, textvariable=self.var_status, font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=GRAY, fg_color=CARD, corner_radius=12, padx=14, height=26)
-        self.lbl_status.grid(row=0, column=3, padx=(0, 22))
+            text_color=GRAY, fg_color=CARD, corner_radius=12, padx=14, height=26,
+            border_width=1, border_color=STROKE)
+        self.lbl_status.grid(row=0, column=4, rowspan=2, padx=(0, 24))
+
+        # 底部品牌色细线
+        ctk.CTkFrame(bar, height=1, fg_color="#123b4a"
+                     ).grid(row=2, column=0, columnspan=5, sticky="ew")
 
     def _set_status(self, text, color):
         self.var_status.set(text)
@@ -271,49 +324,83 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     # 侧边栏（卡片化）
     # ------------------------------------------------------------------
+    def _section(self, parent, text):
+        ctk.CTkLabel(parent, text=text, font=self.f_mono_sm, text_color=GRAY,
+                     anchor="w").pack(fill="x", padx=18, pady=(10, 4))
+
     def _build_sidebar(self):
-        sb = ctk.CTkFrame(self, width=252, corner_radius=0, fg_color=PANEL)
+        sb = ctk.CTkFrame(self, width=268, corner_radius=0, fg_color=PANEL)
         sb.grid(row=1, column=0, sticky="nsw")
         sb.grid_propagate(False)
-        sb.grid_rowconfigure(99, weight=1)   # 弹性空隙
         self._sidebar = sb
 
-        # 平台卡片
-        card = ctk.CTkFrame(sb, corner_radius=12, fg_color=CARD,
+        # ---- 平台卡片 ----
+        self._section(sb, "// 01  PLATFORMS  ·  测绘平台")
+        card = ctk.CTkFrame(sb, corner_radius=10, fg_color=CARD,
                             border_width=1, border_color=STROKE)
-        card.pack(fill="x", padx=14, pady=(16, 8))
-        ctk.CTkLabel(card, text="测绘平台", font=ctk.CTkFont(size=13, weight="bold")
-                     ).pack(anchor="w", padx=16, pady=(12, 6))
+        card.pack(fill="x", padx=14)
         self.sw_platforms = {}
         self.var_platforms = {}
         for name, label in PLATFORM_LABELS:
             var = ctk.BooleanVar(value=True)
-            sw = ctk.CTkSwitch(card, text=label, variable=var, onvalue=True, offvalue=False)
-            sw.pack(anchor="w", padx=16, pady=4)
+            sw = ctk.CTkSwitch(card, text=label, variable=var, onvalue=True,
+                               offvalue=False, font=self.f_body,
+                               progress_color=ACCENT, button_color=ACCENT)
+            sw.pack(anchor="w", padx=14, pady=5)
             self.sw_platforms[name] = sw
             self.var_platforms[name] = var
-        ctk.CTkLabel(card, text="未配 Key 也能跑：本地被动源 + 官网自举",
-                     text_color=GREEN, font=ctk.CTkFont(size=11)
-                     ).pack(anchor="w", padx=16, pady=(6, 12))
+        ctk.CTkLabel(card, text="● 未配 Key 也可运行：8 个本地被动源",
+                     text_color=GREEN, font=self.f_mono_sm
+                     ).pack(anchor="w", padx=14, pady=(6, 12))
 
-        # 操作卡片
-        card2 = ctk.CTkFrame(sb, corner_radius=12, fg_color=CARD,
+        # ---- 本机外部引擎（状态面板）----
+        self._section(sb, "// 02  ENGINES  ·  本机外部引擎")
+        card3 = ctk.CTkFrame(sb, corner_radius=10, fg_color=CARD,
                              border_width=1, border_color=STROKE)
-        card2.pack(fill="x", padx=14, pady=8)
+        card3.pack(fill="x", padx=14)
+        try:
+            avail = set(cybercensus.ext_available())
+        except Exception:
+            avail = set()
+        for name in ("subfinder", "httpx", "wafw00f", "nuclei"):
+            row = ctk.CTkFrame(card3, fg_color="transparent")
+            row.pack(fill="x", padx=14, pady=2)
+            on = name in avail
+            ctk.CTkLabel(row, text="●" if on else "○", font=self.f_mono_sm,
+                         text_color=GREEN if on else "#3d5064"
+                         ).pack(side="left")
+            ctk.CTkLabel(row, text=name, font=self.f_mono,
+                         text_color=TEXT if on else GRAY).pack(side="left", padx=(7, 0))
+            ctk.CTkLabel(row, text="READY" if on else "MISSING", font=self.f_mono_sm,
+                         text_color=GREEN if on else "#3d5064").pack(side="right")
+        ctk.CTkLabel(card3, text="未安装的引擎自动跳过（纯被动仅 subfinder）",
+                     text_color=GRAY, font=self.f_mono_sm, wraplength=220,
+                     justify="left").pack(anchor="w", padx=14, pady=(6, 12))
+
+        # ---- 操作 ----
+        self._section(sb, "// 03  CONFIG  ·  配置")
+        card2 = ctk.CTkFrame(sb, corner_radius=10, fg_color=CARD,
+                             border_width=1, border_color=STROKE)
+        card2.pack(fill="x", padx=14)
         ctk.CTkButton(card2, text="⚙  配置平台 Key…", command=self._open_key_dialog,
                       height=34, corner_radius=8, fg_color="transparent",
-                      border_width=1, border_color=STROKE, hover_color="#1c2634",
-                      text_color="#c9d1d9"
-                      ).pack(fill="x", padx=12, pady=(12, 6))
-        self.var_dark = ctk.BooleanVar(value=True)
-        ctk.CTkSwitch(card2, text="深色模式", variable=self.var_dark,
-                      command=self._toggle_theme
-                      ).pack(anchor="w", padx=16, pady=(2, 12))
+                      border_width=1, border_color=STROKE, hover_color=CARD_HI,
+                      text_color=TEXT, font=self.f_body
+                      ).pack(fill="x", padx=12, pady=12)
 
-        # 底部说明
-        ctk.CTkLabel(sb, text="被动优先 · 证据分级 A/B/C\n确认 = 强证据 ≥1 或 较强证据 ≥2",
-                     text_color=GRAY, font=ctk.CTkFont(size=10), justify="left"
-                     ).pack(side="bottom", anchor="w", padx=20, pady=14)
+        # ---- 底部图例 ----
+        legend = ctk.CTkFrame(sb, fg_color="transparent")
+        legend.pack(side="bottom", fill="x", padx=18, pady=14)
+        ctk.CTkLabel(legend, text="// EVIDENCE GRADE", font=self.f_mono_sm,
+                     text_color=GRAY, anchor="w").pack(fill="x")
+        for color, label in ((GREEN, "确认 · 强证据 ≥1"),
+                             (ORANGE, "疑似 · 较强证据 ≥2"),
+                             (GRAY, "剔除 · 证据不足")):
+            ctk.CTkLabel(legend, text="● " + label, font=self.f_mono_sm,
+                         text_color=color, anchor="w").pack(fill="x", pady=1)
+        ctk.CTkLabel(legend, text="PASSIVE-FIRST · A/B/C GRADING",
+                     font=self.f_mono_sm, text_color="#3d5064",
+                     anchor="w").pack(fill="x", pady=(8, 0))
 
     # ------------------------------------------------------------------
     # 主工作区
@@ -324,82 +411,125 @@ class App(ctk.CTk):
         self._main = m
 
         # ---- 目标卡片 ----
-        card_t = ctk.CTkFrame(m, corner_radius=12, fg_color=CARD,
+        card_t = ctk.CTkFrame(m, corner_radius=10, fg_color=CARD,
                               border_width=1, border_color=STROKE)
         card_t.pack(fill="x")
-        ctk.CTkLabel(card_t, text="测绘目标",
-                     font=ctk.CTkFont(size=13, weight="bold")
-                     ).pack(anchor="w", padx=16, pady=(12, 2))
+        head = ctk.CTkFrame(card_t, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(9, 2))
+        ctk.CTkLabel(head, text="// TARGET  ·  测绘目标", font=self.f_mono_sm,
+                     text_color=ACCENT).pack(side="left")
+        ctk.CTkLabel(head, text="名称 / 域名 / IP / 网段 · 支持多个", font=self.f_mono_sm,
+                     text_color=GRAY).pack(side="right")
         self.var_target = ctk.StringVar()
         self.ent_target = ctk.CTkEntry(
-            card_t, textvariable=self.var_target, height=44,
+            card_t, textvariable=self.var_target, height=42,
             font=ctk.CTkFont(size=14), corner_radius=8, border_color=STROKE,
-            placeholder_text="单位名称 / 域名 / IP / 网段 —— 可多个，空格或逗号分隔")
+            fg_color="#080e16",
+            placeholder_text="单位名称 / 域名 / IP / 网段 —— 空格或逗号分隔")
         self.ent_target.pack(fill="x", padx=16, pady=(2, 2))
         self.ent_target.bind("<KeyRelease>", lambda e: self._preview_target())
-        self.lbl_preview = ctk.CTkLabel(card_t, text="自动识别输入类型…",
-                                        text_color=GRAY, font=ctk.CTkFont(size=12),
+        self.lbl_preview = ctk.CTkLabel(card_t, text="AUTO-DETECT · 自动识别输入类型…",
+                                        text_color=GRAY, font=self.f_mono_sm,
                                         anchor="w")
-        self.lbl_preview.pack(anchor="w", padx=16, pady=(0, 10))
+        self.lbl_preview.pack(anchor="w", padx=16, pady=(0, 7))
 
-        # ---- 模式行 ----
-        frm_mode = ctk.CTkFrame(m, fg_color="transparent")
-        frm_mode.pack(fill="x", pady=(10, 2))
-        self.seg_mode = ctk.CTkSegmentedButton(
-            frm_mode, values=list(MODE_MAP.keys()), command=self._on_mode_change,
-            font=ctk.CTkFont(size=13, weight="bold"), height=36,
-            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
-            unselected_color=CARD, unselected_hover_color="#1c2634",
-            corner_radius=8)
-        self.seg_mode.set("标准")
-        self.seg_mode.pack(side="left")
-        self.lbl_mode_hint = ctk.CTkLabel(frm_mode, text=MODE_HINTS["标准"],
-                                          text_color=GRAY, font=ctk.CTkFont(size=12))
-        self.lbl_mode_hint.pack(side="left", padx=12)
+        # ---- 模式卡片（点击切换，视觉差异明显） ----
+        self._section(m, "// MODE  ·  扫描模式（点击卡片切换）")
+        frm_modes = ctk.CTkFrame(m, fg_color="transparent")
+        frm_modes.pack(fill="x")
+        for c in range(len(MODE_ORDER)):
+            frm_modes.grid_columnconfigure(c, weight=1, uniform="modes")
+        self.mode_cards = {}
+        for i, name in enumerate(MODE_ORDER):
+            code, color, hover, desc, chips = MODE_META[name]
+            card = ctk.CTkFrame(frm_modes, corner_radius=10, fg_color=CARD,
+                                border_width=1, border_color=STROKE, cursor="hand2")
+            card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0))
+            card.grid_columnconfigure(0, weight=1)
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.grid(row=0, column=0, sticky="ew", padx=12, pady=(7, 0))
+            idx = ctk.CTkLabel(top, text="0%d" % (i + 1), font=self.f_mono_sm,
+                               text_color=GRAY)
+            idx.pack(side="left")
+            dot = ctk.CTkLabel(top, text="●", font=self.f_mono_sm, text_color="#3d5064")
+            dot.pack(side="right")
+            title = ctk.CTkLabel(card, text=name, font=ctk.CTkFont(size=14, weight="bold"),
+                                 text_color=TEXT, anchor="w")
+            title.grid(row=1, column=0, sticky="w", padx=12)
+            code_lbl = ctk.CTkLabel(card, text=code, font=self.f_mono_sm,
+                                    text_color=GRAY, anchor="w")
+            code_lbl.grid(row=2, column=0, sticky="w", padx=12)
+            chip = ctk.CTkLabel(card, text=" · ".join(chips), font=self.f_mono_sm,
+                                text_color=GRAY, anchor="w", justify="left",
+                                wraplength=170)
+            chip.grid(row=3, column=0, sticky="w", padx=12, pady=(4, 8))
+            for w in (card, top, idx, dot, title, code_lbl, chip):
+                w.bind("<Button-1>", lambda e, k=name: self._select_mode(k))
+            card.bind("<Enter>", lambda e, c=card, k=name: self._mode_hover(c, k, True))
+            card.bind("<Leave>", lambda e, c=card, k=name: self._mode_hover(c, k, False))
+            self.mode_cards[name] = {"frame": card, "title": title, "code": code_lbl,
+                                     "dot": dot, "chip": chip, "index": idx,
+                                     "color": color, "hover": hover}
+
+        # ---- 能力矩阵（随模式实时变化） ----
+        box = ctk.CTkFrame(m, corner_radius=8, fg_color="#0a1220",
+                           border_width=1, border_color=STROKE)
+        box.pack(fill="x", pady=(6, 0))
+        self.cap_row = ctk.CTkFrame(box, fg_color="transparent")
+        self.cap_row.pack(fill="x", padx=14, pady=(6, 1))
+        self.cap_labels = {}
+        for key in ("被动源", "subfinder", "httpx", "wafw00f", "端口扫描", "nuclei"):
+            lbl = ctk.CTkLabel(self.cap_row, text=key, font=self.f_mono_sm,
+                               text_color=GRAY)
+            lbl.pack(side="left", padx=(0, 16))
+            self.cap_labels[key] = lbl
+        self.lbl_matrix_note = ctk.CTkLabel(box, text="", font=self.f_mono_sm,
+                                            text_color=GRAY, anchor="w")
+        self.lbl_matrix_note.pack(fill="x", padx=14, pady=(0, 6))
+
         self.var_auth = ctk.BooleanVar(value=False)
         self.sw_auth = ctk.CTkSwitch(
-            frm_mode, text="我已获得书面授权", variable=self.var_auth,
-            text_color=RED, progress_color=RED, button_color=RED)
+            box, text="我已获得书面授权（主动模式必勾）", variable=self.var_auth,
+            text_color=RED, progress_color=RED, button_color=RED, font=self.f_mono_sm)
 
         # ---- 运行行 ----
         frm_run = ctk.CTkFrame(m, fg_color="transparent")
-        frm_run.pack(fill="x", pady=(10, 0))
+        frm_run.pack(fill="x", pady=(8, 0))
         self.btn_start = ctk.CTkButton(
-            frm_run, text="▶  开始测绘", width=170, height=44, corner_radius=9,
+            frm_run, text="▶  开始测绘 · 标准", width=200, height=42, corner_radius=9,
             font=ctk.CTkFont(size=15, weight="bold"), fg_color=ACCENT,
-            hover_color=ACCENT_HOVER, command=self._on_start)
+            hover_color=ACCENT_HOVER, text_color="#04141a", command=self._on_start)
         self.btn_start.pack(side="left")
         self.btn_stop = ctk.CTkButton(
-            frm_run, text="⏹ 停止并输出", width=128, height=44, corner_radius=9,
+            frm_run, text="⏹ 停止并输出", width=128, height=42, corner_radius=9,
             fg_color="transparent", border_width=1, border_color=RED,
-            text_color=RED, hover_color="#2a1517", state="disabled",
+            text_color=RED, hover_color="#2a1416", state="disabled",
             command=self._on_stop)
         self.btn_stop.pack(side="left", padx=(10, 0))
         self.bar = ctk.CTkProgressBar(frm_run, height=8, corner_radius=4,
                                       progress_color=ACCENT, fg_color=CARD)
         self.bar.set(0)
-        self.bar.pack(side="left", fill="x", expand=True, padx=(16, 0))
+        self.bar.pack(side="left", fill="x", expand=True, padx=(18, 0))
 
-        # ---- 高级选项（收起） ----
+        # ---- 高级参数（独立窗口，不挤占结果区） ----
         self.btn_adv = ctk.CTkButton(
-            m, text="▸  高级选项", width=120, height=26, corner_radius=6,
-            fg_color="transparent", hover_color="#1c2634",
-            text_color=GRAY, anchor="w", command=self._toggle_adv)
-        self.btn_adv.pack(anchor="w", pady=(8, 0))
-        self._build_advanced()
+            m, text="⚙  高级参数 // ADVANCED", width=190, height=26, corner_radius=6,
+            fg_color="transparent", hover_color=CARD_HI,
+            font=self.f_mono_sm, text_color=GRAY, anchor="w", command=self._open_adv)
+        self.btn_adv.pack(anchor="w", pady=(5, 0))
 
         # ---- 结果卡片 ----
-        frm_cards = ctk.CTkFrame(m, fg_color="transparent")
-        frm_cards.pack(fill="x", pady=(10, 6))
+        frm_cards = ctk.CTkFrame(m, fg_color="transparent", height=1)
+        frm_cards.pack(fill="x", pady=(8, 4))
         for c in range(3):
             frm_cards.grid_columnconfigure(c, weight=1)
-        self.card_confirmed = self._card(frm_cards, 0, "确认资产", GREEN, "完整强证据")
-        self.card_suspect = self._card(frm_cards, 1, "疑似资产", ORANGE, "建议人工核实")
-        self.card_rejected = self._card(frm_cards, 2, "剔除（存疑）", GRAY, "证据不足/三方资源")
+        self.card_confirmed = self._card(frm_cards, 0, "确认资产", GREEN, "A ≥ 1 或 B ≥ 2")
+        self.card_suspect = self._card(frm_cards, 1, "疑似资产", ORANGE, "B = 1 或 C ≥ 1")
+        self.card_rejected = self._card(frm_cards, 2, "剔除（存疑）", GRAY, "无关联证据")
 
         # ---- 结果区：资产列表 / 运行日志 ----
         self.tabview = ctk.CTkTabview(
-            m, corner_radius=10, command=self._on_tab_change,
+            m, height=190, corner_radius=10, command=self._on_tab_change,
             fg_color=CARD, segmented_button_fg_color=PANEL,
             segmented_button_selected_color=ACCENT,
             segmented_button_selected_hover_color=ACCENT_HOVER)
@@ -422,58 +552,80 @@ class App(ctk.CTk):
         self.tree.tag_configure("confirmed", foreground=GREEN)
         self.tree.tag_configure("suspect", foreground=ORANGE)
         self.tree.tag_configure("unknown", foreground=GRAY)
-        self._style_treeview("dark")
+        self._style_treeview()
 
-        self.txt_log = ctk.CTkTextbox(tab_log, font=ctk.CTkFont(family="Consolas", size=12),
+        self.txt_log = ctk.CTkTextbox(tab_log, font=ctk.CTkFont(family=MONO, size=12),
                                       wrap="word", corner_radius=8,
-                                      fg_color="#0d1319", border_width=0)
+                                      fg_color="#060b11", border_width=0)
         self.txt_log.pack(fill="both", expand=True)
         self.txt_log.configure(state="disabled")
         self._apply_log_palette("dark")
         self.tabview.set("运行日志")
 
-        # ---- 底部操作 ----
+        # ---- 底部操作（先 pack 到底部，保证标签页不会把它挤掉） ----
         frm_done = ctk.CTkFrame(m, fg_color="transparent")
-        frm_done.pack(fill="x", pady=(10, 0))
+        frm_done.pack(side="bottom", fill="x", pady=(8, 0), before=self.tabview)
         self.btn_report = ctk.CTkButton(
-            frm_done, text="⬇  生成报告…", width=140, height=36, corner_radius=8,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            frm_done, text="⬇  生成报告…", width=150, height=38, corner_radius=8,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#04141a",
+            text_color_disabled="#0b3b45",
             font=ctk.CTkFont(size=13, weight="bold"),
             state="disabled", command=self._open_report_dialog)
         self.btn_report.pack(side="left")
         self.btn_open_out = ctk.CTkButton(
-            frm_done, text="📁 打开输出文件夹", width=150, height=36, corner_radius=8,
+            frm_done, text="📁 打开输出文件夹", width=150, height=38, corner_radius=8,
             fg_color="transparent", border_width=1, border_color=STROKE,
-            hover_color="#1c2634", state="disabled", command=self._open_out)
+            text_color=TEXT, hover_color=CARD_HI, state="disabled",
+            command=self._open_out)
         self.btn_open_out.pack(side="left", padx=8)
         self.btn_open_html = ctk.CTkButton(
-            frm_done, text="🌐 查看网页报告", width=140, height=36, corner_radius=8,
+            frm_done, text="🌐 查看网页报告", width=140, height=38, corner_radius=8,
             fg_color="transparent", border_width=1, border_color=STROKE,
-            hover_color="#1c2634", state="disabled", command=self._open_html)
+            text_color=TEXT, hover_color=CARD_HI, state="disabled",
+            command=self._open_html)
         self.btn_open_html.pack(side="left")
         self.btn_open_report = ctk.CTkButton(
-            frm_done, text="📄 查看MD报告", width=130, height=36, corner_radius=8,
+            frm_done, text="📄 查看MD报告", width=130, height=38, corner_radius=8,
             fg_color="transparent", border_width=1, border_color=STROKE,
-            hover_color="#1c2634", state="disabled", command=self._open_report)
+            text_color=TEXT, hover_color=CARD_HI, state="disabled",
+            command=self._open_report)
         self.btn_open_report.pack(side="left", padx=8)
 
     def _card(self, parent, col, caption, color, hint=""):
-        f = ctk.CTkFrame(parent, corner_radius=12, fg_color=CARD,
+        f = ctk.CTkFrame(parent, corner_radius=10, fg_color=CARD, height=74,
                          border_width=1, border_color=STROKE)
-        f.grid(row=0, column=col, sticky="ew", padx=6)
-        num = ctk.CTkLabel(f, text="—", font=ctk.CTkFont(size=32, weight="bold"),
-                           text_color=color)
-        num.pack(pady=(10, 0))
-        ctk.CTkLabel(f, text=caption, text_color="#c9d1d9",
-                     font=ctk.CTkFont(size=12, weight="bold")).pack()
+        f.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 6, 0))
+        ctk.CTkFrame(f, width=3, height=1, fg_color=color, corner_radius=2
+                     ).pack(side="left", fill="y")
+        num = ctk.CTkLabel(f, text="0",
+                           font=ctk.CTkFont(family=MONO, size=26, weight="bold"),
+                           text_color=color, width=52, anchor="w")
+        num.pack(side="left", padx=(12, 2), pady=6)
+        txt = ctk.CTkFrame(f, fg_color="transparent")
+        txt.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=6)
+        ctk.CTkLabel(txt, text=caption, text_color=TEXT, anchor="w",
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
         if hint:
-            ctk.CTkLabel(f, text=hint, text_color=GRAY,
-                         font=ctk.CTkFont(size=10)).pack(pady=(0, 10))
+            ctk.CTkLabel(txt, text=hint, text_color=GRAY, anchor="w",
+                         font=self.f_mono_sm).pack(anchor="w")
         return num
 
-    def _build_advanced(self):
-        f = ctk.CTkFrame(self._main, corner_radius=8)
-        self.frm_adv = f   # 不 pack，展开时显示
+    def _build_advanced_dialog(self):
+        win = ctk.CTkToplevel(self)
+        win.title("高级参数 · CyberCensus")
+        win.geometry("780x340")
+        win.configure(fg_color=BG)
+        win.withdraw()
+        win.protocol("WM_DELETE_WINDOW", win.withdraw)
+        self.adv_win = win
+
+        ctk.CTkLabel(win, text="// ADVANCED  ·  高级参数（修改后立即生效）",
+                     font=self.f_mono_sm, text_color=ACCENT
+                     ).pack(anchor="w", padx=20, pady=(14, 0))
+
+        f = ctk.CTkFrame(win, corner_radius=10, fg_color=CARD,
+                         border_width=1, border_color=STROKE)
+        f.pack(fill="both", expand=True, padx=16, pady=10)
         ctk.CTkLabel(f, text="并发线程").grid(row=0, column=0, sticky="e", padx=(14, 4), pady=6)
         self.cmb_threads = ctk.CTkComboBox(f, values=["10", "20", "50", "100"],
                                            width=90)
@@ -484,7 +636,8 @@ class App(ctk.CTk):
         self.cmb_pages.set("1")
         self.cmb_pages.grid(row=0, column=3, sticky="w")
         self.var_debug = ctk.BooleanVar(value=False)
-        ctk.CTkSwitch(f, text="打印平台查询语句（排障）", variable=self.var_debug
+        ctk.CTkSwitch(f, text="打印平台查询语句（排障）", variable=self.var_debug,
+                      progress_color=ACCENT
                       ).grid(row=0, column=4, sticky="w", padx=16)
 
         ctk.CTkLabel(f, text="常用端口前N").grid(row=1, column=0, sticky="e", padx=(14, 4), pady=6)
@@ -496,10 +649,12 @@ class App(ctk.CTk):
         ctk.CTkEntry(f, textvariable=self.var_ports, width=150,
                      placeholder_text="80,443,8000-8100").grid(row=1, column=3, sticky="w")
         self.var_fullports = ctk.BooleanVar(value=False)
-        ctk.CTkSwitch(f, text="全端口(慢)", variable=self.var_fullports
+        ctk.CTkSwitch(f, text="全端口(慢)", variable=self.var_fullports,
+                      progress_color=ACCENT
                       ).grid(row=1, column=4, sticky="w", padx=16)
         self.var_cscan = ctk.BooleanVar(value=False)
-        ctk.CTkSwitch(f, text="C段扩展(仅主动)", variable=self.var_cscan
+        ctk.CTkSwitch(f, text="C段扩展(仅主动)", variable=self.var_cscan,
+                      progress_color=ACCENT
                       ).grid(row=1, column=5, sticky="w", padx=(8, 14))
 
         ctk.CTkLabel(f, text="输出目录").grid(row=2, column=0, sticky="e", padx=(14, 4), pady=6)
@@ -511,12 +666,12 @@ class App(ctk.CTk):
 
         self.var_sensitive = ctk.BooleanVar(value=True)
         ctk.CTkSwitch(f, text="敏感路径探测(.git/.env等，主动模式必查)",
-                      variable=self.var_sensitive
+                      variable=self.var_sensitive, progress_color=ACCENT
                       ).grid(row=3, column=0, columnspan=3, sticky="w", padx=(14, 0), pady=2)
 
         self.var_ext = ctk.BooleanVar(value=True)
         ctk.CTkSwitch(f, text="调用本机外部工具(subfinder/httpx/wafw00f/nuclei)",
-                      variable=self.var_ext
+                      variable=self.var_ext, progress_color=ACCENT
                       ).grid(row=3, column=3, columnspan=3, sticky="w", padx=(14, 0), pady=2)
 
         ctk.CTkLabel(f, text="告警Webhook").grid(row=4, column=0, sticky="e",
@@ -525,20 +680,67 @@ class App(ctk.CTk):
         ctk.CTkEntry(f, textvariable=self.var_webhook, placeholder_text="钉钉/企业微信/飞书机器人 URL（可选）"
                      ).grid(row=4, column=1, columnspan=4, sticky="we", padx=(0, 14))
 
-    # ---- 主题 / 选项面板 ----
-    def _toggle_theme(self):
-        mode = "dark" if self.var_dark.get() else "light"
-        ctk.set_appearance_mode(mode)
-        self._apply_log_palette(mode)
-        self._style_treeview(mode)
+        ctk.CTkLabel(win, text="提示：平台翻页越多越慢、越费配额；全端口扫描建议仅在授权窗口期使用。",
+                     font=self.f_mono_sm, text_color=GRAY
+                     ).pack(anchor="w", padx=22, pady=(2, 0))
+        frm = ctk.CTkFrame(win, fg_color="transparent")
+        frm.pack(fill="x", padx=20, pady=(6, 12))
+        ctk.CTkButton(frm, text="完成", width=110, height=32, corner_radius=8,
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#04141a",
+                      font=ctk.CTkFont(size=13, weight="bold"),
+                      command=win.withdraw).pack(side="right")
 
-    def _style_treeview(self, mode):
-        """给 ttk.Treeview 套深/浅色样式（CTk 不带表格控件，嵌入原生 Treeview）。"""
-        import tkinter.ttk as ttk
-        if mode == "dark":
-            bg, fg, head, sel = "#161b22", "#c9d1d9", "#21262d", "#2f81f7"
+    def _open_adv(self):
+        self.adv_win.deiconify()
+        self.adv_win.lift()
+        self.adv_win.focus_force()
+
+    # ---- 模式切换（视觉联动：卡片 / 能力矩阵 / 主按钮 / 进度条 / 标签页）----
+    def _mode_hover(self, card, name, on):
+        if name == self._mode:
+            return
+        card.configure(border_color=STROKE_HI if on else STROKE)
+
+    def _select_mode(self, name, initial=False):
+        meta = MODE_META.get(name)
+        if not meta:
+            return
+        code, color, hover, desc, chips = meta
+        self._mode = name
+        for n, w in self.mode_cards.items():
+            sel = (n == name)
+            w["frame"].configure(fg_color=CARD_HI if sel else CARD,
+                                 border_color=w["color"] if sel else STROKE,
+                                 border_width=2 if sel else 1)
+            w["title"].configure(text_color=w["color"] if sel else TEXT)
+            w["code"].configure(text_color=w["color"] if sel else GRAY)
+            w["index"].configure(text_color=w["color"] if sel else GRAY)
+            w["dot"].configure(text_color=w["color"] if sel else "#3d5064")
+            w["chip"].configure(text_color=TEXT if sel else GRAY)
+        caps = dict(MODE_CAPS.get(name, ()))
+        for key, lbl in self.cap_labels.items():
+            on = caps.get(key, False)
+            lbl.configure(text=("● " if on else "○ ") + key,
+                          text_color=color if on else "#3d5064")
+        self.lbl_matrix_note.configure(text="//  " + MODE_HINTS.get(name, ""),
+                                       text_color=GRAY)
+        self.btn_start.configure(text="▶  开始测绘 · %s" % name,
+                                 fg_color=color, hover_color=hover)
+        self.btn_report.configure(fg_color=color, hover_color=hover)
+        self.bar.configure(progress_color=color)
+        self.tabview.configure(segmented_button_selected_color=color,
+                               segmented_button_selected_hover_color=hover)
+        self.lbl_mode_tag.configure(text=code, text_color=color)
+        if name == "主动":
+            self.sw_auth.pack(side="right", padx=(0, 6))
         else:
-            bg, fg, head, sel = "#ffffff", "#24292f", "#eaeef2", "#0969da"
+            self.sw_auth.pack_forget()
+
+    # ---- 表格样式 ----
+    def _style_treeview(self):
+        """给 ttk.Treeview 套深色样式（CTk 不带表格控件，嵌入原生 Treeview）。"""
+        import tkinter.ttk as ttk
+        bg, fg, head, sel = "#080e16", "#c6d6e4", "#101b28", "#0e7490"
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
@@ -568,26 +770,12 @@ class App(ctk.CTk):
             except Exception:
                 pass    # 旧版 CTkTextbox 无 tag 支持，纯色输出
 
-    def _toggle_adv(self):
-        if self.frm_adv.winfo_ismapped():
-            self.frm_adv.pack_forget()
-            self.btn_adv.configure(text="▸  高级选项")
-        else:
-            self.frm_adv.pack(fill="x", pady=(4, 0), after=self.btn_adv)
-            self.btn_adv.configure(text="▾  高级选项")
-
-    def _on_mode_change(self, value):
-        self.lbl_mode_hint.configure(text=MODE_HINTS.get(value, ""))
-        if value == "主动":
-            self.sw_auth.pack(side="right")
-        else:
-            self.sw_auth.pack_forget()
-
     # ---- 目标解析预览 ----
     def _preview_target(self):
         text = self.ent_target.get()
         if not text.strip():
-            self.lbl_preview.configure(text="自动识别输入类型…", text_color=GRAY)
+            self.lbl_preview.configure(text="AUTO-DETECT · 自动识别输入类型…",
+                                       text_color=GRAY)
             return
         names, domains, ips, errors = parse_targets(text)
         if errors:
@@ -697,7 +885,7 @@ class App(ctk.CTk):
             messagebox.showwarning("缺少目标",
                                    "请输入单位名称 / 域名 / IP / 网段（可多个，空格或逗号分隔）")
             return
-        mode = MODE_MAP.get(self.seg_mode.get(), "standard")
+        mode = MODE_MAP.get(self._mode, "standard")
         if mode == "active" and not self.var_auth.get():
             messagebox.showwarning("需要授权确认",
                                    "主动扫描会真实访问并扫描目标，请先勾选书面授权确认。")
@@ -822,7 +1010,7 @@ class App(ctk.CTk):
         self.bar.set(0)
         self._set_status("● 出错", RED)
         for card in (self.card_confirmed, self.card_suspect, self.card_rejected):
-            card.configure(text="—")
+            card.configure(text="0")
         if getattr(self, "_last_engine", None) is not None:
             self.btn_report.configure(state="normal")
         self._append_log("运行出错：", "!")
