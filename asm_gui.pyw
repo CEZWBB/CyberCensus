@@ -111,7 +111,7 @@ def parse_targets(text):
 def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
-               formats=None, sensitive=None, probe_interval=0.0):
+               formats=None, sensitive=None, probe_interval=0.0, webhook=""):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
@@ -127,7 +127,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         timeout=10.0,
         scan_timeout=2.5,
         out=out,
-        output_formats=(",".join(formats) if formats else "md,csv,json"),
+        output_formats=(",".join(formats) if formats else "md,csv,html"),
         no_probe=(mode == "passive"),
         no_discover=False,   # 名称模式默认启用搜索引擎官网自举（被动模式自动跳过）
         probe_found=False,
@@ -150,6 +150,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         no_providers=(not platforms),
         config=config,
         debug_provider=bool(debug_provider),
+        webhook=webhook or "",
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
@@ -443,6 +444,12 @@ class App(ctk.CTk):
                       variable=self.var_sensitive
                       ).grid(row=3, column=0, columnspan=3, sticky="w", padx=(14, 0), pady=2)
 
+        ctk.CTkLabel(f, text="告警Webhook").grid(row=4, column=0, sticky="e",
+                                                 padx=(14, 4), pady=6)
+        self.var_webhook = ctk.StringVar(value="")
+        ctk.CTkEntry(f, textvariable=self.var_webhook, placeholder_text="钉钉/企业微信/飞书机器人 URL（可选）"
+                     ).grid(row=4, column=1, columnspan=4, sticky="we", padx=(0, 14))
+
     # ---- 主题 / 选项面板 ----
     def _toggle_theme(self):
         mode = "dark" if self.var_dark.get() else "light"
@@ -637,6 +644,7 @@ class App(ctk.CTk):
             debug_provider=self.var_debug.get(),
             sensitive=self.var_sensitive.get(),
             probe_interval=0.0,
+            webhook=self.var_webhook.get().strip(),
         )
         self._last_out_dir = args.out
 
@@ -745,7 +753,7 @@ class App(ctk.CTk):
             return
         win = ctk.CTkToplevel(self)
         win.title("生成报告")
-        win.geometry("460x300")
+        win.geometry("460x370")
         win.resizable(False, False)
         win.after(300, lambda: win.grab_set())
 
@@ -753,9 +761,12 @@ class App(ctk.CTk):
                      font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w",
                                                                     padx=18, pady=(16, 8))
         var_md = ctk.BooleanVar(value=True)
+        var_html = ctk.BooleanVar(value=True)
         var_csv = ctk.BooleanVar(value=True)
         var_json = ctk.BooleanVar(value=False)
-        ctk.CTkSwitch(win, text="可读报告（MD，适合阅读和交付）",
+        ctk.CTkSwitch(win, text="网页报告（HTML，带资产关系图，适合交付）",
+                      variable=var_html).pack(anchor="w", padx=22, pady=3)
+        ctk.CTkSwitch(win, text="可读报告（MD，纯文本版）",
                       variable=var_md).pack(anchor="w", padx=22, pady=3)
         ctk.CTkSwitch(win, text="资产台账（CSV，适合 Excel 管理）",
                       variable=var_csv).pack(anchor="w", padx=22, pady=3)
@@ -774,8 +785,8 @@ class App(ctk.CTk):
                       ).pack(side="left")
 
         def _generate():
-            fmts = [k for k, v in (("md", var_md.get()), ("csv", var_csv.get()),
-                                   ("json", var_json.get())) if v]
+            fmts = [k for k, v in (("html", var_html.get()), ("md", var_md.get()),
+                                   ("csv", var_csv.get()), ("json", var_json.get())) if v]
             if not fmts:
                 messagebox.showwarning("未选择格式", "请至少选择一种报告格式。", parent=win)
                 return

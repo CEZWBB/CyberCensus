@@ -24,6 +24,7 @@ cybercensus.py —— CyberCensus：单位名称 / 域名 / IP 的互联网暴�
 import argparse
 import base64
 import csv
+import html as html_mod
 import ipaddress
 import json
 import os
@@ -373,6 +374,12 @@ TECH_MARKERS = [
     ("Exchange", ["owa/", "outlook web app"]),
     ("深信服SSL-VPN", ["isclogin", "深信服"]),
     ("Citrix", ["citrix"]),
+    ("金和OA", ["jinhe", "金和"]),
+    ("华天动力OA", ["huatian", "华天动力"]),
+    ("ShowDoc", ["showdoc"]),
+    ("海康威视", ["ivms", "hikvision"]),
+    ("大华", ["dahua", "dh_"]),
+    ("H3C", ["h3c", "华三"]),
     ("Swagger", ["swagger-ui", "swagger"]),
 ]
 
@@ -411,6 +418,77 @@ def tech_risk(tech):
     for name, note in RISKY_TECH.items():
         if name.lower() in (tech or "").lower():
             out.append("%s：%s" % (name, note))
+    return out
+
+
+# WAF 指纹（借鉴 wafw00f）：靠响应头/Cookie/页面标记识别防护设备
+WAF_SIGNATURES = (
+    ("阿里云盾", ["aliyun", "aliyungf", "errors.aliyun.com", "yundun"]),
+    ("腾讯云WAF", ["waf.tencent", "tencent-waf"]),
+    ("Cloudflare", ["cloudflare", "__cfduid", "cf_clearance", "cf-ray"]),
+    ("360企业安全", ["360wzws", "wzws"]),
+    ("长亭雷池", ["safeline"]),
+    ("安全狗", ["safedog", "waf/2.0"]),
+    ("知道创宇创宇盾", ["yunsuo", "yunaq", "knownsec"]),
+    ("Imperva", ["incap_ses", "visid_incap"]),
+    ("Akamai", ["akamaighost", "akamai"]),
+    ("F5 BIG-IP", ["bigipserver", "big-ip"]),
+    ("安恒WAF", ["dbappsecurity", "dbappwaf"]),
+    ("华为WAF", ["huaweicloudwaf"]),
+    ("ModSecurity", ["mod_security", "modsecurity"]),
+)
+
+
+def detect_waf(headers_text, body):
+    """识别响应中的 WAF 标记；返回 WAF 名称或空串。"""
+    hay = ((headers_text or "") + " " + (body or "")[:4000]).lower()
+    for name, marks in WAF_SIGNATURES:
+        if any(m in hay for m in marks):
+            return name
+    return ""
+
+
+# JS 敏感信息（借鉴 FindSomething/WebInfoHunter）：高精度密钥特征
+SECRET_PATTERNS = (
+    ("阿里云AccessKey", re.compile(r"LTAI[A-Za-z0-9]{12,20}")),
+    ("腾讯云SecretId", re.compile(r"AKID[A-Za-z0-9]{20,40}")),
+    ("AWS AccessKey", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("私钥文件内容", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
+)
+
+
+def scan_js_secrets(text):
+    """扫描 JS 文本中的高精度密钥特征，返回命中的类型列表。"""
+    return [name for name, pat in SECRET_PATTERNS if pat.search(text or "")]
+
+
+# 常见子域字典（借鉴 ksubdomain/dnsbrute：小字典而非大爆破，只做 DNS 解析）
+COMMON_SUBS = (
+    "www", "mail", "oa", "erp", "crm", "hr", "vpn", "ftp", "sso", "auth",
+    "api", "app", "m", "wap", "admin", "portal", "zwfw", "gov", "news",
+    "bbs", "shop", "pay", "open", "dev", "test", "uat", "staging", "demo",
+    "monitor", "zabbix", "git", "svn", "jenkins", "wiki", "docs", "mx",
+    "ns1", "ns2", "dns", "cache", "cdn", "static", "img", "video", "file",
+)
+
+
+def brute_subdomains(domain, resolver=None, workers=16):
+    """小字典子域枚举：只做 DNS 解析（不碰目标端口），返回 {host: ip}。"""
+    resolve = resolver or resolve_a
+    out = {}
+
+    def _one(w):
+        h = "%s.%s" % (w, domain)
+        try:
+            ips = resolve(h)
+        except Exception:
+            ips = ()
+        return h, (sorted(ips)[0] if ips else "")
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for h, ip in ex.map(_one, COMMON_SUBS):
+            if ip:
+                out[h] = ip
     return out
 
 QUIET = False
@@ -498,6 +576,25 @@ def _extract_emails(text, limit=8):
     return out
 
 
+def _extract_scripts(body, base_url, limit=8):
+    """从页面提取外部 JS 脚本绝对 URL（JSFinder/WebInfoHunter 的前置步骤）。"""
+    out = []
+    base = base_url.rstrip("/")
+    for m in re.finditer(r'<script[^>]+src\s*=\s*["\']([^"\']+)["\']', body or "", re.I):
+        src = m.group(1).strip()
+        if src.startswith("//"):
+            src = "https:" + src
+        elif src.startswith("/"):
+            src = base + src
+        elif not src.lower().startswith(("http://", "https://")):
+            continue
+        if src not in out:
+            out.append(src)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _extract_meta(body):
     """提取页面 meta 描述/关键词/应用名——SPA 站标题为空时的关键互证文本。"""
     parts = []
@@ -519,7 +616,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     out = {"url": url, "status": "", "title": "", "server": "",
            "powered": "", "beian": "", "analytics": "", "favicon": "",
            "tech": "", "body_len": 0, "credit_code": "", "refs": [], "meta": "",
-           "emails": []}
+           "emails": [], "scripts": [], "waf": ""}
     body = ""
     status = ""
     hdrs = {}
@@ -557,6 +654,9 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     out["credit_code"] = extract_credit_code(body)   # 页脚常印统一社会信用代码
     out["meta"] = _extract_meta(body)                # SPA 站的单位名常在 meta 里
     out["emails"] = _extract_emails(body)            # 页面联系邮箱
+    out["scripts"] = _extract_scripts(body, url)     # 外部 JS（后续挖域名/密钥）
+    out["waf"] = detect_waf(
+        " ".join("%s:%s" % (k, v) for k, v in hdrs.items()), body)  # 防护设备识别
     # 页面外链/JS 引用的域名（文档 5.2 前端深挖金矿）：候选资产线索
     out["refs"] = [m.group(1) for m in _DOMAIN_IN_TEXT_RE.finditer(body)]
 
@@ -1408,18 +1508,32 @@ def grab_banner(ip, port, timeout=3):
     不依赖 nmap：对 Web 端口发 HEAD，对 Redis 发 PING，其余直接读欢迎语
     （SSH/FTP/SMTP/MySQL 等都会主动吐版本横幅）。返回首行文本或空串。
     """
-    probes = {
-        6379: b"*1\r\n$4\r\nPING\r\n",
-    }
+    # 协议探针（借鉴 Goby 的服务识别）：发送最小协议请求读回版本信息
+    def _http_get_probe(ip):
+        return ("GET / HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" % ip).encode()
+
+    # MongoDB isMaster（OP_QUERY admin.$cmd）
+    mongo_ismaster = (b"\x3a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+                      b"\xd4\x07\x00\x00\x00\x00\x00\x00admin.$cmd\x00"
+                      b"\x00\x00\x00\x00\xff\xff\xff\xff\x13\x00\x00\x00"
+                      b"\x10isMaster\x00\x01\x00\x00\x00\x00")
     try:
         with socket.create_connection((ip, port), timeout=timeout) as s:
             s.settimeout(timeout)
             if port in (80, 8000, 8008, 8080, 8081, 8088, 888, 8888, 9000):
                 s.sendall(("HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n" % ip).encode())
-            elif port in probes:
-                s.sendall(probes[port])
+            elif port in (9200, 2375, 5601, 3000):
+                s.sendall(_http_get_probe(ip))       # Elasticsearch/Docker/Monitoring
+            elif port == 6379:
+                s.sendall(b"*1\r\n$4\r\nPING\r\n")   # Redis
+            elif port == 11211:
+                s.sendall(b"stats\r\n")              # Memcached
+            elif port == 27017:
+                s.sendall(mongo_ismaster)            # MongoDB
+            elif port == 3306:
+                pass                                 # MySQL 主动发握手包
             try:
-                data = s.recv(512)
+                data = s.recv(768)
             except socket.timeout:
                 return ""
             text = data.decode("utf-8", "replace")
@@ -1611,6 +1725,8 @@ class Engine(object):
         self.contacts = set()     # 页面/摘要提取的联系邮箱
         self._beian_candidates = set()  # 搜索摘要备案号候选（需自验证才升级）
         self._code_candidates = set()   # 搜索摘要信用代码候选（需自验证才升级）
+        self._js_urls = []              # 待扫描的外部 JS 地址（JSFinder 思路）
+        self.js_secrets = []            # JS 敏感信息 [(url, 类型), ...]
         self.rejected = []        # 被剔除的资产（含原因）
 
     # ---- 资产登记 ----
@@ -1815,6 +1931,8 @@ class Engine(object):
                 for ref in (info.get("refs") or []):
                     self._ref_candidates.append(ref)
                 self.contacts.update(info.get("emails") or [])
+                self._js_urls.extend(info.get("scripts") or [])
+                self._apply_waf(a, info.get("waf", ""))
                 if a.analytics:
                     self.anchor["analytics"].add(a.analytics)
                     log("  锚点统计ID: %s" % a.analytics, "+")
@@ -1870,6 +1988,13 @@ class Engine(object):
                     allsubs |= set(items)
                 else:
                     allsubs |= set(items)
+            # 小字典子域枚举（ksubdomain 思路，只做 DNS 解析不碰端口）
+            if not getattr(self.args, "no_brute", False) and d not in self.anchor["weak_domains"]:
+                bt = brute_subdomains(d)
+                if bt:
+                    log("  DNS字典 得到 %d 个" % len(bt))
+                    ht.update(bt)
+                    allsubs |= set(bt)
             allsubs.add(d)
             if len(allsubs) > 500:
                 log("  子域过多（%d），仅取前 500 个（大集团域名常见）" % len(allsubs), "!")
@@ -2199,6 +2324,8 @@ class Engine(object):
                 for ref in (info.get("refs") or []):
                     self._ref_candidates.append(ref)
                 self.contacts.update(info.get("emails") or [])
+                self._js_urls.extend(info.get("scripts") or [])
+                self._apply_waf(a, info.get("waf", ""))
                 if cert:
                     a.cert_org = cert.get("org", "")
                     a.cert_san = ",".join(cert.get("sans", [])[:20])
@@ -2710,6 +2837,35 @@ class Engine(object):
         if self.apps:
             log("移动端 APP 发现: %d 个（清单见报告）" % len(self.apps), "+")
 
+    @staticmethod
+    def _apply_waf(a, waf):
+        if waf and "WAF:" not in (a.tech or ""):
+            a.tech = (a.tech + "," if a.tech else "") + "WAF:%s" % waf
+            log("  WAF识别: %s → %s" % (a.host, waf), "!")
+
+    def mine_js_secrets(self, total=40, per_limit=512 * 1024):
+        """JS 文件挖掘（JSFinder + FindSomething 思路）。
+
+        抓取页面引用的外部 JS：提取其中域名作为候选资产（常暴露未公开系统），
+        扫描高精度密钥特征（云 AK/SK、私钥）进 js_secrets 供报告展示。
+        """
+        urls = [u for u in dict.fromkeys(self._js_urls)][:total]
+        if not urls:
+            return
+        log("JS 挖掘: %d 个脚本" % len(urls))
+        for u in urls:
+            try:
+                body = http_get(u, timeout=8, retries=0, max_bytes=per_limit)
+            except Exception:
+                continue
+            for m in _DOMAIN_IN_TEXT_RE.finditer(body):
+                self._ref_candidates.append(m.group(1))
+            for kind in scan_js_secrets(body):
+                self.js_secrets.append((u[:120], kind))
+                log("  [!] JS 密钥特征: %s → %s" % (u[:80], kind), "!")
+        if self.js_secrets:
+            log("JS 挖掘完成: %d 处敏感信息（见报告）" % len(self.js_secrets), "!")
+
     def mine_and_verify_refs(self, limit=6):
         """页面外链/JS 引用挖掘（文档 5.2 前端深挖金矿）。
 
@@ -2821,6 +2977,12 @@ class Engine(object):
             with open(md_path, "w", encoding="utf-8") as f:
                 f.write(self._report(rows, groups, ts, baseline_diff))
 
+        if "html" in fmts:
+            html_path = base + ".html"
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(self._html_report(rows, groups, ts, baseline_diff))
+            files["html"] = html_path
+
         for k in ("confirmed", "suspect", "rejected", "all"):
             if k in files:
                 log("%-10s %s" % (k, files[k]), "+")
@@ -2828,6 +2990,8 @@ class Engine(object):
             log("JSON      %s" % json_path, "+")
         if md_path:
             log("MD        %s" % md_path, "+")
+        if "html" in files:
+            log("HTML      %s" % files["html"], "+")
         return files, json_path, md_path
 
     def _report(self, rows, groups, ts, baseline_diff=None):
@@ -2961,6 +3125,16 @@ class Engine(object):
                     _md(a.tech[:60]), _md("；".join(notes))))
             L.append("")
 
+        # ---- JS 敏感信息（FindSomething/WebInfoHunter 思路） ----
+        if self.js_secrets:
+            L.append("## ⚠️ JS 敏感信息（%d 处，仅特征匹配，需人工确认）\n" % len(self.js_secrets))
+            L.append("| 脚本地址 | 特征类型 |")
+            L.append("|----------|----------|")
+            for u, kind in self.js_secrets[:30]:
+                L.append("| %s | %s |" % (_md(u), _md(kind)))
+            L.append("")
+            L.append("> 云 AccessKey/私钥泄露可能直接导致云资源失陷——**建议优先人工确认并轮换**。\n")
+
         # ---- 联系方式（页面提取） ----
         if self.contacts:
             L.append("## 联系方式（页面/摘要提取，%d 个）\n" % len(self.contacts))
@@ -3036,6 +3210,241 @@ class Engine(object):
             L.append("- 本次包含**主动扫描**，请确认在授权范围内。")
         L.append("")
         return "\n".join(L)
+
+
+    # ---- 5.1 HTML 报告（借鉴 ARL/Yakit 的 Web 交付形态，自包含单文件） ----
+    def _svg_graph(self, rows, max_domains=8, max_ips=10):
+        """资产关系图：主体 → 域名 → IP（Yakit 资产地图的轻量实现）。
+
+        纯 SVG 字符串输出，无外部依赖。域名/ IP 按归属资产聚合。
+        """
+        esc = html_mod.escape
+        dom_ips = {}
+        ip_ports = {}
+        order = {"确认": 0, "疑似": 1, "存疑": 2}
+        for a in sorted(rows, key=lambda x: order.get(x.confidence, 3)):
+            host = (a.host or "").lower()
+            if not host:
+                continue
+            is_ip = re.match(r"^\d+\.\d+\.\d+\.\d+$", host)
+            key = "" if is_ip else host
+            ip = a.ip or (host if is_ip else "")
+            if key:
+                dom_ips.setdefault(key, set())
+                if ip:
+                    dom_ips[key].add(ip)
+            if ip:
+                ip_ports.setdefault(ip, set())
+                if a.port:
+                    ip_ports[ip].add(str(a.port))
+        domains = [d for d in dom_ips if dom_ips[d]][:max_domains]
+        if not domains:
+            return ""
+        ips = sorted({ip for d in domains for ip in dom_ips[d]})[:max_ips]
+        rows_n = max(len(domains), len(ips), 1)
+        h = 40 + rows_n * 46
+        parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="860" height="%d" '
+                 'font-family="sans-serif" font-size="12">' % h]
+        parts.append('<rect width="100%%" height="100%%" fill="#0d1117"/>')
+        parts.append('<text x="20" y="22" fill="#8b949e">主体域名</text>')
+        parts.append('<text x="360" y="22" fill="#8b949e">解析 IP / 开放端口</text>')
+        dy_d = max(1, (h - 40) // max(1, len(domains)))
+        pos = {}
+        for i, d in enumerate(domains):
+            y = 44 + i * dy_d
+            pos[d] = y
+            parts.append('<rect x="20" y="%d" width="270" height="30" rx="6" '
+                         'fill="#161b22" stroke="#2f81f7"/>' % (y - 8))
+            parts.append('<text x="32" y="%d" fill="#c9d1d9">%s</text>'
+                         % (y + 4, esc(d[:38])))
+        dy_i = max(1, (h - 40) // max(1, len(ips)))
+        for j, ip in enumerate(ips):
+            y = 44 + j * dy_i
+            ports = ",".join(sorted(ip_ports.get(ip, ()), key=lambda p: int(p))[:6])
+            parts.append('<rect x="360" y="%d" width="440" height="30" rx="6" '
+                         'fill="#161b22" stroke="#3fb950"/>' % (y - 8))
+            parts.append('<text x="372" y="%d" fill="#c9d1d9">%s  %s</text>'
+                         % (y + 4, esc(ip), esc(("端口 " + ports) if ports else "")))
+        for d in domains:
+            for ip in sorted(dom_ips.get(d, ()))[:max_ips]:
+                if ip in ips:
+                    parts.append('<line x1="290" x2="360" y1="%d" y2="%d" '
+                                 'stroke="#484f58"/>'
+                                 % (pos[d] - 1, 44 + ips.index(ip) * dy_i - 1))
+        parts.append("</svg>")
+        return "\n".join(parts)
+
+    def _html_report(self, rows, groups, ts, baseline_diff=None):
+        """自包含单文件 HTML 报告（深色主题、卡片统计、资产关系图）。"""
+        esc = html_mod.escape
+
+        def counts():
+            return {"确认": len(groups["确认"]), "疑似": len(groups["疑似"]),
+                    "存疑": len(groups["存疑"])}
+
+        c = counts()
+        risky = [(a, tech_risk(a.tech)) for a in rows if tech_risk(a.tech)]
+        found = [a for a in rows if a.findings]
+
+        def table(items, show_reason=False):
+            if not items:
+                return "<p class='muted'>无</p>"
+            head = ("<tr><th>分类</th><th>主机</th><th>IP</th><th>端口</th>"
+                    "<th>标题</th><th>服务器</th><th>指纹</th><th>敏感发现</th>"
+                    "<th>归属说明</th>" + ("<th>剔除原因</th>" if show_reason else "")
+                    + "</tr>")
+            body = []
+            for a in items:
+                cls = {"确认": "ok", "疑似": "warn", "存疑": "muted2"}.get(a.confidence, "")
+                cells = (
+                    "<td class='%s'>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                    % (cls, esc(a.confidence), esc(a.host or ""), esc(a.ip or ""),
+                       esc(str(a.port or "")), esc(a.title or ""), esc(a.server or ""),
+                       esc((a.tech or "")[:40]),
+                       esc("、".join(f.split("|", 1)[-1] for f in sorted(a.findings))),
+                       esc(plain_evidence(a.evidence))))
+                if show_reason:
+                    cells += "<td>%s</td>" % esc(a.reject_reason)
+                body.append("<tr>%s</tr>" % cells)
+            return "<table>%s%s</table>" % (head, "".join(body))
+
+        css = """
+        body{background:#0d1117;color:#c9d1d9;font-family:"Microsoft YaHei",sans-serif;margin:0;padding:24px}
+        h1{color:#58a6ff}h2{color:#58a6ff;border-bottom:1px solid #30363d;padding-bottom:6px;margin-top:32px}
+        table{border-collapse:collapse;width:100%;margin:8px 0}
+        th,td{border:1px solid #30363d;padding:6px 8px;text-align:left;font-size:13px;vertical-align:top}
+        th{background:#161b22}
+        .cards{display:flex;gap:16px;margin:16px 0}
+        .card{flex:1;background:#161b22;border-radius:10px;padding:16px;text-align:center}
+        .card b{display:block;font-size:32px}
+        .ok{color:#3fb950;font-weight:bold}.warn{color:#d29922;font-weight:bold}
+        .muted2{color:#8b949e}.muted{color:#8b949e}
+        .tip{background:#161b22;border-left:4px solid #d29922;padding:10px 14px;border-radius:4px}
+        code{background:#161b22;padding:1px 4px;border-radius:3px}
+        """
+        parts = ["<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
+                 "<title>CyberCensus 资产测绘报告</title><style>%s</style></head><body>" % css]
+        parts.append("<h1>CyberCensus 资产测绘报告</h1>")
+        parts.append("<p class='muted'>生成时间：%s%s</p>"
+                     % (esc(ts), (" ｜ 主体：%s" % esc("、".join(self.names)))
+                        if self.names else ""))
+        if self.anchor["beian"]:
+            parts.append("<p class='muted'>锚点备案号：%s</p>"
+                         % esc("、".join(sorted(self.anchor["beian"]))))
+        if self.anchor["credit_codes"]:
+            parts.append("<p class='muted'>统一社会信用代码：%s</p>"
+                         % esc("、".join(sorted(self.anchor["credit_codes"]))))
+        parts.append("<div class='cards'>"
+                     "<div class='card'><b class='ok'>%d</b>确认</div>"
+                     "<div class='card'><b class='warn'>%d</b>疑似</div>"
+                     "<div class='card'><b class='muted2'>%d</b>剔除</div></div>"
+                     % (c["确认"], c["疑似"], c["存疑"]))
+
+        if baseline_diff:
+            parts.append("<h2>增量对比（上轮 %s）</h2>" % esc(baseline_diff.get("prev_ts", "?")))
+            if baseline_diff.get("added"):
+                parts.append("<p><b class='ok'>新增 %d：</b>%s</p>"
+                             % (len(baseline_diff["added"]),
+                                esc("、".join(k for k, _ in baseline_diff["added"][:20]))))
+            if baseline_diff.get("changed"):
+                parts.append("<p><b class='warn'>变化 %d：</b>%s</p>"
+                             % (len(baseline_diff["changed"]),
+                                esc("；".join("%s(%s)" % (ch["key"], "、".join(ch["changes"]))
+                                              for ch in baseline_diff["changed"][:10]))))
+            if baseline_diff.get("removed"):
+                parts.append("<p class='muted'>下线 %d：%s</p>"
+                             % (len(baseline_diff["removed"]),
+                                esc("、".join(k for k, _ in baseline_diff["removed"][:20]))))
+
+        graph = self._svg_graph(rows)
+        if graph:
+            parts.append("<h2>资产关系图</h2>")
+            parts.append(graph)
+
+        if found:
+            parts.append("<h2>⚠️ 敏感路径发现（%d）</h2>" % len(found))
+            parts.append("<table><tr><th>资产</th><th>分级</th><th>发现</th></tr>")
+            for a in found:
+                names = "、".join(sorted(f.split("|", 1)[-1] for f in a.findings))
+                parts.append("<tr><td>%s:%s</td><td>%s</td><td>%s</td></tr>"
+                             % (esc(a.host or ""), esc(str(a.port or "")),
+                                esc(a.confidence), esc(names)))
+            parts.append("</table>")
+
+        if risky:
+            parts.append("<h2>⚠️ 风险组件提示（%d，仅指纹识别，未执行验证）</h2>" % len(risky))
+            parts.append("<table><tr><th>资产</th><th>指纹</th><th>风险提示</th></tr>")
+            for a, notes in risky:
+                parts.append("<tr><td>%s:%s</td><td>%s</td><td>%s</td></tr>"
+                             % (esc(a.host or ""), esc(str(a.port or "")),
+                                esc((a.tech or "")[:50]), esc("；".join(notes))))
+            parts.append("</table>")
+
+        if self.apps:
+            parts.append("<h2>📱 移动端应用（App Store，%d）</h2>" % len(self.apps))
+            parts.append("<table><tr><th>应用名</th><th>开发者</th><th>包名</th>"
+                         "<th>归属依据</th></tr>")
+            for track, seller, bundle, reason in self.apps:
+                parts.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                             % (esc(track), esc(seller), esc(bundle), esc(reason)))
+            parts.append("</table>")
+
+        if self.js_secrets:
+            parts.append("<h2>⚠️ JS 敏感信息（%d 处，仅特征匹配）</h2>" % len(self.js_secrets))
+            parts.append("<table><tr><th>脚本地址</th><th>特征类型</th></tr>")
+            for u, kind in self.js_secrets[:30]:
+                parts.append("<tr><td>%s</td><td>%s</td></tr>" % (esc(u), esc(kind)))
+            parts.append("</table>")
+
+        if self.contacts:
+            parts.append("<h2>联系方式（页面/摘要提取）</h2><p>%s</p>"
+                         % " ".join("<code>%s</code>" % esc(e) for e in sorted(self.contacts)))
+
+        if self.risk_hints:
+            parts.append("<h2>风险线索（搜索引擎情报，未验证）</h2>")
+            parts.append("<table><tr><th>类别</th><th>链接</th></tr>")
+            for kind, u in self.risk_hints[:40]:
+                parts.append("<tr><td>%s</td><td>%s</td></tr>" % (esc(kind), esc(u)))
+            parts.append("</table>")
+
+        parts.append("<h2>确认资产（%d）</h2>" % c["确认"])
+        parts.append(table(groups["确认"]))
+        parts.append("<h2>疑似资产（%d）</h2>" % c["疑似"])
+        parts.append(table(groups["疑似"]))
+        parts.append("<h2>已剔除（%d）</h2>" % c["存疑"])
+        parts.append(table(groups["存疑"], show_reason=True))
+        parts.append("<p class='tip'>判定规则：确认 = 强证据(A)≥1 或 较强证据(B)≥2；"
+                     "疑似 = B=1 或 弱证据(C)≥1；剔除 = 无证据或三方云资源且无强证据。"
+                     "强证据：备案号 / 证书O= / 统一社会信用代码 / 已知主域名子域。</p>")
+        parts.append("</body></html>")
+        return "\n".join(parts)
+
+
+def send_webhook(url, text, timeout=10):
+    """向 Webhook 推送完成通知（兼容钉钉/企业微信/飞书机器人载荷形状）。
+
+    payload 同时带 msgtype/text 与 msg_type/content 两套键，多余键被平台忽略。
+    """
+    if not url:
+        return False
+    payload = {
+        "msgtype": "text", "text": {"content": text},
+        "msg_type": "text", "content": {"text": text},
+    }
+    try:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json; charset=utf-8"})
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as r:
+            ok = r.status < 400
+            if ok:
+                log("Webhook 通知已发送", "+")
+            return ok
+    except Exception as e:
+        log("Webhook 通知失败: %s" % str(e)[:80], "!")
+        return False
 
 
 def _md(s):
@@ -3184,8 +3593,10 @@ def build_parser():
     p.add_argument("--scan-timeout", type=float, default=2.5, dest="scan_timeout",
                    help="TCP 端口扫描连接超时秒数（默认2.5；与 --timeout 的 HTTP 超时独立）")
     p.add_argument("--out", default="cybercensus_out", help="输出目录")
-    p.add_argument("--formats", default="md,csv,json", dest="output_formats",
-                   help="输出哪些格式：md / csv / json，逗号分隔（默认全出）")
+    p.add_argument("--formats", default="md,csv,html", dest="output_formats",
+                   help="输出哪些格式：md / csv / html / json，逗号分隔（默认 md,csv,html）")
+    p.add_argument("--webhook", default="",
+                   help="扫描完成/发现新增资产时推送到 Webhook（钉钉/企业微信/飞书机器人 URL）")
     p.add_argument("--no-probe", action="store_true", help="完全不触碰目标（纯第三方数据）")
     p.add_argument("--no-discover", action="store_true",
                    help="仅给名称时禁用搜索引擎官网自举（默认启用）")
@@ -3195,6 +3606,8 @@ def build_parser():
                    help="--probe-found 时最多探测多少个主机（默认100）")
     p.add_argument("--probe-interval", type=float, default=0, dest="probe_interval",
                    help="主动 HTTP 探测的全局请求间隔秒数（默认0=不节流；建议 0.1~0.5 降噪）")
+    p.add_argument("--no-brute", action="store_true",
+                   help="禁用常见子域小字典 DNS 枚举（默认开启，仅解析不碰端口）")
     p.add_argument("--no-apps", action="store_true",
                    help="不查 App Store（移动端 APP 发现，默认开启）")
     p.add_argument("--no-hints", action="store_true",
@@ -3294,7 +3707,8 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         if do_sens and not _stopped():
             eng.probe_sensitive(limit=getattr(args, "sensitive_limit", 200))
     if not _stopped():
-        # 页面外链/JS 引用挖掘（锚点页 + 所有探测过的页面正文）
+        # JS 文件挖掘（域名 + 密钥特征）→ 页面外链互证
+        eng.mine_js_secrets()
         eng.mine_and_verify_refs()
     if _stopped():
         log("已请求停止：对已收集的数据做分级输出。", "!")
@@ -3302,6 +3716,17 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
     # 增量监控：与输出目录中的上一轮基线对比（新资产/新端口/新敏感发现告警）
     baseline_diff = eng.diff_baseline()
     eng.save_baseline()
+    # 完成通知（ARL-Next 式 Webhook 告警）
+    hook = getattr(args, "webhook", "") or ""
+    if hook:
+        counts = {"确认": 0, "疑似": 0, "存疑": 0}
+        for a in eng.assets.values():
+            counts[a.confidence] = counts.get(a.confidence, 0) + 1
+        msg = ("CyberCensus 扫描完成：确认 %d / 疑似 %d / 剔除 %d / 合计 %d"
+               % (counts["确认"], counts["疑似"], counts["存疑"], len(eng.assets)))
+        if baseline_diff and baseline_diff.get("added"):
+            msg += "；新增资产 %d 个" % len(baseline_diff["added"])
+        send_webhook(hook, msg)
     if not do_output:
         return eng, {}, "", ""
     files, json_path, md_path = eng.output(baseline_diff=baseline_diff)

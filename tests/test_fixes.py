@@ -1269,5 +1269,134 @@ class TestToolLearning(unittest.TestCase):
         self.assertTrue(any("域名同名备份" in n for _, n in hits))
 
 
+# ----------------------------------------------------------------------------
+# HTML 报告（ARL/Yakit 式交付形态） + Webhook 通知（ARL-Next）
+# ----------------------------------------------------------------------------
+class TestHtmlReport(unittest.TestCase):
+    def _engine(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        a = e.add_asset("www.x.gov.cn", 443, "https", source="anchor")
+        a.title = "某单位官网"
+        a.beian = "粤ICP备12345678号"
+        a.ip = "1.2.3.4"
+        a.tech = "Nginx,泛微OA"
+        a.findings.add("/.git/config|Git仓库泄露")
+        e.anchor["beian"].add("粤ICP备12345678号")
+        e.names = ["某单位"]
+        e.evaluate()
+        return e
+
+    def test_html_sections_and_svg(self):
+        e = self._engine()
+        rows = sorted(e.assets.values(), key=lambda a: a.host or "")
+        groups = {"确认": [], "疑似": [], "存疑": []}
+        for a in rows:
+            groups.get(a.confidence, groups["存疑"]).append(a)
+        html = e._html_report(rows, groups, "20260101_000000")
+        self.assertIn("CyberCensus 资产测绘报告", html)
+        self.assertIn("确认资产", html)
+        self.assertIn("敏感路径发现", html)
+        self.assertIn("泛微", html)             # 风险组件提示
+        self.assertIn("<svg", html)             # 关系图
+        self.assertIn("1.2.3.4", html)
+        self.assertTrue(html.rstrip().endswith("</html>"))
+
+    def test_output_html_format(self):
+        e = self._engine()
+        out = tempfile.mkdtemp(prefix="sm_html_")
+        e.args.out = out
+        e.args.active = False
+        e.args.output_formats = "html"
+        try:
+            files, _, _ = e.output()
+            produced = os.listdir(out)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+        self.assertIn("html", files)
+        self.assertEqual(len(produced), 1)
+        self.assertTrue(produced[0].endswith(".html"))
+
+
+class TestWebhook(unittest.TestCase):
+    def test_send_webhook_payload(self):
+        captured = {}
+
+        class _Resp(object):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=None, context=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return _Resp()
+
+        import urllib.request
+        orig = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        self.addCleanup(urllib.request.__setattr__, "urlopen", orig)
+        ok = cybercensus.send_webhook("https://hook.example/x", "测试完成")
+        self.assertTrue(ok)
+        self.assertEqual(captured["body"]["msgtype"], "text")
+        self.assertEqual(captured["body"]["text"]["content"], "测试完成")
+        self.assertEqual(captured["body"]["msg_type"], "text")   # 飞书/企微形状
+
+    def test_empty_webhook_is_noop(self):
+        self.assertFalse(cybercensus.send_webhook("", "x"))
+
+
+# ----------------------------------------------------------------------------
+# wafw00f/FindSomething/JSFinder/ksubdomain 思路
+# ----------------------------------------------------------------------------
+class TestReconIdeas(unittest.TestCase):
+    def test_detect_waf(self):
+        self.assertEqual(cybercensus.detect_waf("Server: cloudflare; cf-ray: 123", ""),
+                         "Cloudflare")
+        self.assertEqual(cybercensus.detect_waf("Set-Cookie: safedog_cache=1", ""),
+                         "安全狗")
+        self.assertEqual(cybercensus.detect_waf("Server: nginx", "正常页面"), "")
+
+    def test_scan_js_secrets(self):
+        self.assertIn("阿里云AccessKey",
+                      cybercensus.scan_js_secrets('var k="LTAI5tAbCdEfGhIjKlMn";'))
+        self.assertIn("AWS AccessKey",
+                      cybercensus.scan_js_secrets("AKIAABCDEFGHIJKLMNOP"))
+        self.assertEqual(cybercensus.scan_js_secrets("var a = 1;"), [])
+
+    def test_extract_scripts(self):
+        body = ('<script src="/js/app.js"></script>'
+                '<script src="//cdn.x.com/lib.js"></script>'
+                '<script src="https://other.com/x.js"></script>'
+                '<script>inline()</script>')
+        scripts = cybercensus._extract_scripts(body, "https://www.x.com")
+        self.assertIn("https://www.x.com/js/app.js", scripts)
+        self.assertIn("https://cdn.x.com/lib.js", scripts)
+        self.assertIn("https://other.com/x.js", scripts)
+        self.assertEqual(len(scripts), 3)
+
+    def test_brute_subdomains(self):
+        def fake_resolve(h):
+            return {"www.x.com": {"1.1.1.1"}, "mail.x.com": {"2.2.2.2"}}.get(h, set())
+        out = cybercensus.brute_subdomains("x.com", resolver=fake_resolve)
+        self.assertEqual(out.get("www.x.com"), "1.1.1.1")
+        self.assertEqual(out.get("mail.x.com"), "2.2.2.2")
+        self.assertNotIn("oa.x.com", out)
+
+    def test_mine_js_secrets_flow(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e._js_urls = ["https://www.x.com/static/app.js"]
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda url, **kw: (
+            'var api="https://api.hidden.x.com"; var key="LTAI5tAbCdEfGhIjKlMn";')
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        e.mine_js_secrets()
+        self.assertTrue(any("阿里云" in k for _, k in e.js_secrets))
+        self.assertIn("api.hidden.x.com", e._ref_candidates)   # JS 里的域名进候选
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

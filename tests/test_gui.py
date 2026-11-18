@@ -123,11 +123,15 @@ class TestBuildArgs(unittest.TestCase):
 
     def test_output_formats(self):
         args = gui.build_args("standard", [])
-        self.assertEqual(args.output_formats, "md,csv,json")
+        self.assertEqual(args.output_formats, "md,csv,html")
         args = gui.build_args("standard", [], formats=["md"])
         self.assertEqual(args.output_formats, "md")
-        args = gui.build_args("standard", [], formats=["md", "csv"])
-        self.assertEqual(args.output_formats, "md,csv")
+        args = gui.build_args("standard", [], formats=["html", "csv"])
+        self.assertEqual(args.output_formats, "html,csv")
+
+    def test_webhook_passthrough(self):
+        args = gui.build_args("standard", [], webhook="https://hook.example/x")
+        self.assertEqual(args.webhook, "https://hook.example/x")
 
     def test_ports_priority(self):
         args = gui.build_args("standard", [], top=5)
