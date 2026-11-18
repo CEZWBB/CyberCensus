@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1595,6 +1596,75 @@ class TestExternalTools(unittest.TestCase):
         e.run_external_tools()
         self.assertEqual(e.ext_used, {})
         self.assertEqual(e.assets, {})
+
+
+# ----------------------------------------------------------------------------
+# APP / 小程序包静态分析
+# ----------------------------------------------------------------------------
+class TestPassiveRegionCandidates(unittest.TestCase):
+    def test_prefers_province_candidates(self):
+        """纯被动下"四川移动"只取省级候选，不把全国根域 10086.cn 当弱锚点。"""
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5, no_probe=True))
+        e.names = ["四川移动"]
+        orig_lookup = cybercensus.search_engine_lookup
+        orig_disc = cybercensus.discover_domains_from_search
+        cybercensus.search_engine_lookup = lambda n, timeout=15: ("", [])
+        cybercensus.discover_domains_from_search = (
+            lambda name, max_candidates=5, lookup=None: [
+                ("www.10086.cn", 3), ("wap.sc.10086.cn", 1),
+                ("dcp.sc.10086.cn", 1)])
+        self.addCleanup(cybercensus.__setattr__,
+                        "search_engine_lookup", orig_lookup)
+        self.addCleanup(cybercensus.__setattr__,
+                        "discover_domains_from_search", orig_disc)
+        e.discover_names_to_domains()
+        self.assertIn("sc.10086.cn", e.domains)
+        self.assertIn("wap.sc.10086.cn", e.domains)
+        self.assertNotIn("10086.cn", e.domains)
+        self.assertNotIn("www.10086.cn", e.domains)
+        self.assertTrue({"sc.10086.cn"} <= e.anchor["weak_domains"])
+
+
+class TestPackageAnalysis(unittest.TestCase):
+    def _mk_apk(self, tmpdir):
+        p = os.path.join(tmpdir, "app.apk")
+        dex = ('const-string "https://api.xx-hospital.com/api/login"\n'
+               'const-string "https://cdn.track.umeng.com/collect"\n'
+               'const-string "amap.com"\n'
+               'key = "LTAI5tAbCdEfGhIjKlMn"\n')
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("classes.dex", dex)
+            z.writestr("assets/logo.png", b"\x89PNG fake")
+        return p
+
+    def test_analyze_package_extracts(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._mk_apk(d)
+            r = cybercensus.analyze_package(p)
+            self.assertEqual(r["files"], 1)
+            self.assertIn("api.xx-hospital.com", r["domains"])
+            self.assertIn("cdn.track.umeng.com", r["domains"])   # 原始提取保留
+            self.assertIn("https://api.xx-hospital.com/api/login", r["urls"])
+            self.assertIn("阿里云AccessKey", r["secrets"])
+            self.assertEqual(r["error"], "")
+
+    def test_engine_filters_sdk_and_adds_candidates(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._mk_apk(d)
+            e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+            e.analyze_packages([p])
+            self.assertIn("xx-hospital.com", e._ref_candidates)
+            self.assertNotIn("umeng.com", e._ref_candidates)
+            self.assertNotIn("amap.com", e._ref_candidates)
+            self.assertEqual(len(e.packages), 1)
+            self.assertEqual(e.packages[0]["files"], 1)
+            self.assertEqual(e.packages[0]["secrets"], ["阿里云AccessKey"])
+
+    def test_missing_path_reports_error(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.analyze_packages(["Z:/definitely/not/here.apk"])
+        self.assertEqual(e.packages, [])
 
 
 if __name__ == "__main__":

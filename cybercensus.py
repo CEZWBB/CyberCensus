@@ -42,6 +42,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 import zlib
 import gzip
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -463,6 +464,104 @@ SECRET_PATTERNS = (
 def scan_js_secrets(text):
     """扫描 JS 文本中的高精度密钥特征，返回命中的类型列表。"""
     return [name for name, pat in SECRET_PATTERNS if pat.search(text or "")]
+
+
+# ----------------------------------------------------------------------------
+# APP / 小程序包静态分析（无需反编译）
+#
+# 思路：APK（zip 容器）与 wxapkg（微信小程序包）里的 classes.dex / 编译后 JS
+# 以明文保存着大量硬编码的后台地址、API 域名、管理入口与 AccessKey。
+# 直接按字节扫字符串即可拿到这些线索，不需要 jadx/浏览器，也不联网接触目标。
+# 提取结果只作为"候选"进入互证流程，避免第三方 SDK 域名污染确认清单。
+# ----------------------------------------------------------------------------
+_PKG_URL_RE = re.compile(
+    r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{4,300}", re.I)
+_PKG_SKIP_EXT = (
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg",
+    ".mp3", ".mp4", ".avi", ".mkv", ".wav", ".ogg", ".ttf", ".otf",
+    ".woff", ".woff2", ".eot", ".so", ".dll", ".zip", ".7z", ".rar",
+)
+_PKG_MAX_FILE = 64 * 1024 * 1024      # 单文件最多读 64MB
+_PKG_MAX_MEMBER = 12 * 1024 * 1024    # zip 内单条目最多读 12MB
+
+
+def _pkg_scan_text(text, urls, domains):
+    """从一段文本提取 URL 与域名（去重后写入集合）。"""
+    for m in _PKG_URL_RE.finditer(text):
+        u = m.group(0).rstrip(").,;'\"\\]}")
+        host = _url_host(u)
+        if not host or "." not in host:
+            continue
+        urls.add(u[:300])
+        domains.add(host.lower())
+    for m in _DOMAIN_IN_TEXT_RE.finditer(text):
+        domains.add(m.group(1).lower())
+
+
+def analyze_package(path, max_files=600):
+    """静态扫描 APK / wxapkg / 目录：提取后台域名、URL 与密钥特征。
+
+    返回 {path, files, domains:set, urls:set, secrets:[], error}。
+    纯本地读取，不联网、不执行包内代码。
+    """
+    res = {"path": path, "files": 0, "domains": set(), "urls": set(),
+           "secrets": [], "error": ""}
+    try:
+        if os.path.isdir(path):
+            files = []
+            for root, _dirs, names in os.walk(path):
+                for n in names:
+                    if n.lower().endswith((".apk", ".wxapkg")):
+                        files.append(os.path.join(root, n))
+            files = files[:max_files]
+        elif os.path.isfile(path):
+            files = [path]
+        else:
+            res["error"] = "路径不存在"
+            return res
+        if not files:
+            res["error"] = "目录下没有 .apk / .wxapkg 文件"
+            return res
+
+        samples, sample_bytes = [], 0
+
+        def _scan(text):
+            nonlocal sample_bytes
+            _pkg_scan_text(text, res["urls"], res["domains"])
+            if sample_bytes < 2 * 1024 * 1024:
+                piece = text[:200000]
+                samples.append(piece)
+                sample_bytes += len(piece)
+
+        for fp in files:
+            res["files"] += 1
+            try:
+                if zipfile.is_zipfile(fp):
+                    with zipfile.ZipFile(fp) as zf:
+                        for info in zf.infolist():
+                            if info.is_dir() or info.file_size <= 0:
+                                continue
+                            name = info.filename.lower()
+                            if name.endswith(_PKG_SKIP_EXT):
+                                continue
+                            if info.file_size > _PKG_MAX_MEMBER:
+                                continue
+                            try:
+                                data = zf.read(info)
+                            except Exception:
+                                continue
+                            _scan(data.decode("latin-1", "ignore"))
+                else:
+                    if os.path.getsize(fp) > _PKG_MAX_FILE:
+                        continue
+                    with open(fp, "rb") as fh:
+                        _scan(fh.read().decode("latin-1", "ignore"))
+            except Exception:
+                continue
+        res["secrets"] = scan_js_secrets("".join(samples))
+    except Exception as e:
+        res["error"] = str(e)[:200]
+    return res
 
 
 # 常见子域字典（借鉴 ksubdomain/dnsbrute：小字典而非大爆破，只做 DNS 解析）
@@ -989,6 +1088,13 @@ PAGE_JUNK_ROOTS = SEARCH_JUNK_ROOTS | frozenset((
     "umeng.com", "growingio.com", "sensors.com", "matomo.org", "hotjar.com",
     # 公众号/新媒体平台本身（文章来源域不是目标资产）
     "mp.weixin.qq.com", "weixin.qq.com", "mp.weixin.com",
+    # APP/小程序常见第三方 SDK（推送/统计/崩溃/热更新/云存储）
+    "jpush.cn", "getui.com", "igexin.com", "gexin.com",
+    "firebaseio.com", "crashlytics.com", "appsflyer.com", "adjust.com",
+    "branch.io", "openinstall.io", "mob.com", "shareinstall.com",
+    "talkingdata.com", "sensorsdata.cn", "mixpanel.com",
+    "pgyer.com", "fir.im", "aliyuncs.com", "myqcloud.com", "qcloud.com",
+    "cloudfront.net", "akamaihd.net", "android.com",
 ))
 
 
@@ -1738,6 +1844,7 @@ class Engine(object):
         self.risk_hints = []      # 搜索引擎情报线索 [(类别, url), ...]
         self._ref_candidates = [] # 页面外链/JS 引用的域名（待互证候选）
         self.apps = []            # 移动端 APP 资产 [(名称, 开发者, 包名, 归属依据), ...]
+        self.packages = []        # APP/小程序包静态分析结果（本地包）
         self.contacts = set()     # 页面/摘要提取的联系邮箱
         self._beian_candidates = set()  # 搜索摘要备案号候选（需自验证才升级）
         self._code_candidates = set()   # 搜索摘要信用代码候选（需自验证才升级）
@@ -1800,16 +1907,45 @@ class Engine(object):
             for name in self.names:
                 lookup = search_engine_lookup(name)
                 self._absorb_search_text(lookup[0])
-                cands = discover_domains_from_search(name, max_candidates=3, lookup=lookup)
+                cands = discover_domains_from_search(name, max_candidates=5,
+                                                     lookup=lookup)
+                # 名称含省份时优先带省份缩写/全拼标签的候选：
+                # "四川移动" 命中 wap.sc.10086.cn / dcp.sc.10086.cn，
+                # 而不是只拿全国共用的 www.10086.cn
+                hints = [c for prov, codes in PROVINCE_CODES.items()
+                         if prov in name for c in codes]
+
+                def _regionish(host):
+                    labels = set(host.split("."))
+                    return any((len(c) == 2 and c in labels) or
+                               (len(c) > 2 and c in host) for c in hints)
+
+                picked = [d for d, _ in cands if hints and _regionish(d)]
+                pool = picked or [d for d, _ in cands]
+                if picked:
+                    log("按省份缩写优先（%s）: %s"
+                        % ("/".join(hints), ", ".join(picked)), "+")
                 added = []
-                for dom, score in cands:
+                for dom in pool:
                     root = root_domain(dom)
                     if not root or root in SEARCH_JUNK_ROOTS:
                         continue
-                    if root not in self.domains:
-                        self.domains.add(root)
-                        self.anchor["weak_domains"].add(root)
-                        added.append(root)
+                    # 候选保留主机名而不是一律截到根域：
+                    # "四川移动" 的 wap.sc.10086.cn 只补省级父域 sc.10086.cn，
+                    # 不把全国共用的 10086.cn 当弱锚点（否则全国资产都被拉进来）
+                    weak_hosts = [dom]
+                    depth = dom.count(".") - root.count(".")
+                    if depth <= 1:
+                        weak_hosts.append(root)
+                    else:
+                        parent = dom.split(".", 1)[1]
+                        if parent and parent != root:
+                            weak_hosts.append(parent)
+                    for h in weak_hosts:
+                        if h not in self.domains:
+                            self.domains.add(h)
+                            self.anchor["weak_domains"].add(h)
+                            added.append(h)
                 if added:
                     log("纯被动模式：搜索引擎候选域名（未验证，结果只进疑似）: %s"
                         % ", ".join(added), "+")
@@ -2994,6 +3130,54 @@ class Engine(object):
                 else:
                     log("nuclei: 未命中（模板由 nuclei 维护，本工具只收结果）")
 
+    # ---- APP / 小程序包静态分析（用户提供本地包；不联网、不执行）----
+    def analyze_packages(self, paths, per_pkg_candidates=30):
+        """扫描本地 APK / wxapkg：提取硬编码后台域名与接口地址。
+
+        提取结果先经三方 SDK 域名过滤，再作为**候选**进入既有互证流程
+        （标题/证书 O=/信用代码），通过才入锚点——避免反编译字符串
+        直接污染确认清单。接口 URL 与密钥线索在报告中单列。
+        """
+        paths = [p for p in (paths or []) if p]
+        if not paths:
+            return
+        log("== APP/小程序包静态分析（本地读取，不联网）==", "#")
+        exclude = set()
+        for d in self.domains:
+            exclude.add(d)
+            exclude.add(root_domain(d))
+        seen, total_cands = set(), 0
+        for p in paths:
+            r = analyze_package(p)
+            if r["error"]:
+                log("  包分析失败: %s（%s）" % (p, r["error"]), "!")
+                continue
+            cands = []
+            for d in filter_candidate_roots(sorted(r["domains"]),
+                                            exclude_roots=exclude):
+                if d not in seen:
+                    seen.add(d)
+                    cands.append(d)
+            cands = cands[:per_pkg_candidates]
+            for d in cands:
+                self._ref_candidates.append(d)
+            total_cands += len(cands)
+            self.packages.append({
+                "path": p, "files": r["files"],
+                "domains": sorted(r["domains"])[:80],
+                "candidates": cands,
+                "urls": sorted(r["urls"])[:80],
+                "secrets": list(dict.fromkeys(r["secrets"])),
+            })
+            log("  %s: %d 个文件，提取 %d 域名 / %d URL，%d 个进入互证"
+                % (os.path.basename(p.rstrip("\\/")) or p, r["files"],
+                   len(r["domains"]), len(r["urls"]), len(cands)), "+")
+            if r["secrets"]:
+                log("  [!] 包内密钥特征: %s" % "、".join(dict.fromkeys(r["secrets"])), "!")
+        if self.packages:
+            log("包分析合计: %d 个包，%d 个候选域名待互证（通过才入锚点）"
+                % (len(self.packages), total_cands), "+")
+
     def mine_js_secrets(self, total=40, per_limit=512 * 1024):
         """JS 文件挖掘（JSFinder + FindSomething 思路）。
 
@@ -3115,6 +3299,7 @@ class Engine(object):
                 "provider_records": len(self.provider_records),
                 "counts": {k: len(v) for k, v in groups.items()},
                 "apps": self.apps,
+                "packages": self.packages,
                 "ext_tools": sorted(self.ext_used),
                 "ext_detected": sorted(self.ext_detected),
                 "ext_hits": self.ext_hits,
@@ -3340,6 +3525,40 @@ class Engine(object):
             L.append("> 说明：iOS 端由 App Store 公开搜索发现；**Android 各商店（应用宝/华为/小米）"
                      "为客户端加载无法免登录自动抓取**，建议人工在应用商店搜索补全；"
                      "小程序与公众号账号本身需人工核实（小程序业务域名通常已含在本台账域名中）。\n")
+
+        # ---- APP / 小程序包静态分析 ----
+        if self.packages:
+            L.append("## 📦 APP / 小程序包分析（本地静态提取，%d 个包）\n"
+                     % len(self.packages))
+            L.append("| 包 | 文件数 | 提取域名 | 待互证候选 |")
+            L.append("|----|--------|----------|------------|")
+            for p in self.packages:
+                name = os.path.basename(str(p.get("path", "")).rstrip("\\/")) or p.get("path", "")
+                L.append("| %s | %s | %s | %s |" % (
+                    _md(name), p.get("files", 0), len(p.get("domains") or []),
+                    _md("、".join(p.get("candidates") or []) or "—")))
+            L.append("")
+            urls = []
+            for p in self.packages:
+                for u in p.get("urls") or []:
+                    if u not in urls:
+                        urls.append(u)
+            if urls:
+                L.append("**硬编码后台 / 接口地址（供人工核实，未验证归属）**：\n")
+                for u in urls[:40]:
+                    L.append("- `%s`" % _md(u))
+                L.append("")
+            secrets = []
+            for p in self.packages:
+                for s in p.get("secrets") or []:
+                    if s not in secrets:
+                        secrets.append(s)
+            if secrets:
+                L.append("**包内密钥特征**：%s（可能为第三方 SDK 的公开 Key，需人工确认）\n"
+                         % "、".join(secrets))
+            L.append("> 说明：直接扫描安装包内的明文字符串（classes.dex / 编译后 JS），"
+                     "**不执行包、不联网**；提取域名已过滤三方 SDK，"
+                     "仅作为互证候选，未通过标题/证书验证的不会进入确认清单。\n")
 
         # ---- 风险线索（搜索引擎情报） ----
         if self.risk_hints:
@@ -3575,6 +3794,39 @@ class Engine(object):
                 parts.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
                              % (esc(track), esc(seller), esc(bundle), esc(reason)))
             parts.append("</table>")
+
+        if self.packages:
+            parts.append("<h2>📦 APP / 小程序包分析（本地静态提取，%d）</h2>"
+                         % len(self.packages))
+            parts.append("<table><tr><th>包</th><th>文件数</th>"
+                         "<th>提取域名</th><th>待互证候选</th></tr>")
+            for p in self.packages:
+                name = os.path.basename(str(p.get("path", "")).rstrip("\\/")) or p.get("path", "")
+                parts.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                    esc(name), p.get("files", 0), len(p.get("domains") or []),
+                    esc("、".join(p.get("candidates") or []) or "—")))
+            parts.append("</table>")
+            urls = []
+            for p in self.packages:
+                for u in p.get("urls") or []:
+                    if u not in urls:
+                        urls.append(u)
+            if urls:
+                parts.append("<p><b>硬编码后台 / 接口地址</b>（供人工核实，未验证归属）：</p><ul>")
+                for u in urls[:40]:
+                    parts.append("<li><code>%s</code></li>" % esc(u))
+                parts.append("</ul>")
+            secrets = []
+            for p in self.packages:
+                for s in p.get("secrets") or []:
+                    if s not in secrets:
+                        secrets.append(s)
+            if secrets:
+                parts.append("<p><b>包内密钥特征</b>：%s</p>"
+                             % esc("、".join(secrets)))
+            parts.append("<p class='muted'>说明：直接扫描包内明文字符串，"
+                         "不执行包、不联网；域名已过滤三方 SDK，"
+                         "仅作互证候选。</p>")
 
         if self.js_secrets:
             parts.append("<h2>⚠️ JS 敏感信息（%d 处，仅特征匹配）</h2>" % len(self.js_secrets))
@@ -3992,6 +4244,10 @@ def build_parser():
                    help="禁用常见子域小字典 DNS 枚举（默认开启，仅解析不碰端口）")
     p.add_argument("--no-apps", action="store_true",
                    help="不查 App Store（移动端 APP 发现，默认开启）")
+    p.add_argument("--apk", action="append", default=[], dest="app_packages",
+                   help="本机 APK 文件或目录（可多次）：静态提取硬编码后台域名/URL，不联网")
+    p.add_argument("--wxapkg", action="append", default=[], dest="app_packages",
+                   help="本机微信小程序包（.wxapkg）文件或目录（可多次），同上")
     p.add_argument("--no-hints", action="store_true",
                    help="不做搜索引擎 dork 风险情报（默认开启）")
     p.add_argument("--sensitive", action="store_true",
@@ -4101,9 +4357,11 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         if do_sens and not _stopped():
             eng.probe_sensitive(limit=getattr(args, "sensitive_limit", 200))
     if not _stopped():
-        # JS 文件挖掘（域名 + 密钥特征）→ 页面外链互证
+        # APP/小程序包静态分析（本地包，用户提供）→ 候选域名
+        eng.analyze_packages(getattr(args, "app_packages", []))
+        # JS 文件挖掘（域名 + 密钥特征）→ 页面外链 + 包内候选互证
         eng.mine_js_secrets()
-        eng.mine_and_verify_refs()
+        eng.mine_and_verify_refs(limit=10)
     if _stopped():
         log("已请求停止：对已收集的数据做分级输出。", "!")
     eng.evaluate()

@@ -147,7 +147,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
                formats=None, sensitive=None, probe_interval=0.0, webhook="",
-               ext=True):
+               ext=True, packages=None):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
@@ -191,6 +191,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         ext_tools=None,
         no_ext=not bool(ext),
         ext_sub_limit=3000,
+        app_packages=list(packages or []),
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
@@ -535,6 +536,7 @@ class App(ctk.CTk):
             segmented_button_selected_hover_color=ACCENT_HOVER)
         self.tabview.pack(fill="both", expand=True, pady=(4, 0))
         tab_assets = self.tabview.add("资产列表")
+        tab_apps = self.tabview.add("APP 应用")
         tab_log = self.tabview.add("运行日志")
 
         import tkinter.ttk as ttk
@@ -552,6 +554,20 @@ class App(ctk.CTk):
         self.tree.tag_configure("confirmed", foreground=GREEN)
         self.tree.tag_configure("suspect", foreground=ORANGE)
         self.tree.tag_configure("unknown", foreground=GRAY)
+
+        # APP 应用标签页（App Store 发现的移动端资产）
+        acols = ("应用名", "开发者", "包名", "归属依据")
+        awidths = (240, 320, 260, 260)
+        self.tree_apps = ttk.Treeview(tab_apps, columns=acols, show="headings",
+                                      selectmode="browse")
+        for c, w in zip(acols, awidths):
+            self.tree_apps.heading(c, text=c)
+            self.tree_apps.column(c, width=w, anchor="w")
+        avsb = ttk.Scrollbar(tab_apps, orient="vertical", command=self.tree_apps.yview)
+        self.tree_apps.configure(yscrollcommand=avsb.set)
+        self.tree_apps.pack(side="left", fill="both", expand=True)
+        avsb.pack(side="right", fill="y")
+
         self._style_treeview()
 
         self.txt_log = ctk.CTkTextbox(tab_log, font=ctk.CTkFont(family=MONO, size=12),
@@ -613,7 +629,7 @@ class App(ctk.CTk):
     def _build_advanced_dialog(self):
         win = ctk.CTkToplevel(self)
         win.title("高级参数 · CyberCensus")
-        win.geometry("780x340")
+        win.geometry("800x390")
         win.configure(fg_color=BG)
         win.withdraw()
         win.protocol("WM_DELETE_WINDOW", win.withdraw)
@@ -679,6 +695,17 @@ class App(ctk.CTk):
         self.var_webhook = ctk.StringVar(value="")
         ctk.CTkEntry(f, textvariable=self.var_webhook, placeholder_text="钉钉/企业微信/飞书机器人 URL（可选）"
                      ).grid(row=4, column=1, columnspan=4, sticky="we", padx=(0, 14))
+
+        ctk.CTkLabel(f, text="APP/小程序包").grid(row=5, column=0, sticky="e",
+                                                 padx=(14, 4), pady=6)
+        self.var_packages = ctk.StringVar(value="")
+        ctk.CTkEntry(f, textvariable=self.var_packages,
+                     placeholder_text="APK / .wxapkg 文件或目录，多个用 ; 分隔（本地静态扫描）"
+                     ).grid(row=5, column=1, columnspan=3, sticky="we", padx=(0, 4))
+        ctk.CTkButton(f, text="文件…", width=64, command=self._pick_packages
+                      ).grid(row=5, column=4, sticky="w")
+        ctk.CTkButton(f, text="目录…", width=64, command=self._pick_package_dir
+                      ).grid(row=5, column=5, sticky="w", padx=(6, 14))
 
         ctk.CTkLabel(win, text="提示：平台翻页越多越慢、越费配额；全端口扫描建议仅在授权窗口期使用。",
                      font=self.f_mono_sm, text_color=GRAY
@@ -763,6 +790,13 @@ class App(ctk.CTk):
             tag = r[6]
             self.tree.insert("", "end", values=r[:7], tags=(tag,))
 
+    def _populate_apps(self, eng):
+        """把 App Store 发现的应用填进 APP 标签页。"""
+        self.tree_apps.delete(*self.tree_apps.get_children())
+        for track, seller, bundle, reason in getattr(eng, "apps", []) or []:
+            self.tree_apps.insert("", "end",
+                                  values=(track, seller, bundle, reason))
+
     def _apply_log_palette(self, mode):
         for tag, color in LOG_PALETTE[mode].items():
             try:
@@ -808,6 +842,20 @@ class App(ctk.CTk):
         d = filedialog.askdirectory(initialdir=BASE_DIR, title="选择输出目录")
         if d:
             self.var_out.set(d)
+
+    # ---- APP / 小程序包选择（本地静态分析）----
+    def _pick_packages(self):
+        paths = filedialog.askopenfilenames(
+            title="选择 APK / 小程序包（可多选）",
+            filetypes=[("APP 包", "*.apk *.wxapkg *.ap"), ("所有文件", "*.*")])
+        if paths:
+            self.var_packages.set(";".join(paths))
+
+    def _pick_package_dir(self):
+        d = filedialog.askdirectory(title="选择包含 APK / .wxapkg 的目录")
+        if d:
+            cur = self.var_packages.get().strip()
+            self.var_packages.set((cur + ";" if cur else "") + d)
 
     # ---- Key 配置对话框 ----
     def _open_key_dialog(self):
@@ -894,6 +942,8 @@ class App(ctk.CTk):
             if not messagebox.askyesno("全端口确认", "全端口 1-65535 非常慢，确定继续？"):
                 return
         platforms = [n for n, v in self.var_platforms.items() if v.get()]
+        packages = [p.strip() for p in re.split(r"[;\n]+", self.var_packages.get())
+                    if p.strip()]
         outdir = os.path.abspath(self.var_out.get().strip() or "cybercensus_out")
         args = build_args(
             mode, platforms,
@@ -909,6 +959,7 @@ class App(ctk.CTk):
             probe_interval=0.0,
             webhook=self.var_webhook.get().strip(),
             ext=self.var_ext.get(),
+            packages=packages,
         )
         self._last_out_dir = args.out
 
@@ -917,6 +968,7 @@ class App(ctk.CTk):
         self.txt_log.delete("1.0", "end")
         self.txt_log.configure(state="disabled")
         self.tree.delete(*self.tree.get_children())
+        self.tree_apps.delete(*self.tree_apps.get_children())
         for card in (self.card_confirmed, self.card_suspect, self.card_rejected):
             card.configure(text="…")
         self.btn_report.configure(state="disabled")
@@ -994,15 +1046,32 @@ class App(ctk.CTk):
         self.card_suspect.configure(text=str(counts["疑似"]))
         self.card_rejected.configure(text=str(counts["存疑"]))
         self._populate_table(eng)
+        self._populate_apps(eng)
         self._append_log("=" * 60, "#")
         self._append_log("完成：确认 %d | 疑似 %d | 剔除 %d | 合计 %d"
                          % (counts["确认"], counts["疑似"], counts["存疑"], len(eng.assets)), "#")
-        if eng.assets:
+        extra = []
+        if getattr(eng, "apps", None):
+            extra.append("APP %d 个" % len(eng.apps))
+        if getattr(eng, "packages", None):
+            extra.append("APP/小程序包 %d 个" % len(eng.packages))
+        if getattr(eng, "js_secrets", None):
+            extra.append("JS 密钥线索 %d 处" % len(eng.js_secrets))
+        if getattr(eng, "ext_hits", None):
+            extra.append("外部工具命中 %d 条" % len(eng.ext_hits))
+        if extra:
+            self._append_log("其他发现：" + " / ".join(extra) + "（报告中有单独章节）", "+")
+        # 即使资产为 0，只要 APP / 包 / 密钥等有结果，也允许生成报告
+        has_results = bool(eng.assets or extra)
+        if has_results:
             self.btn_report.configure(state="normal")   # 结果就绪，可按需生成报告
-            self.tabview.set("资产列表")
+            if eng.assets:
+                self.tabview.set("资产列表")
+            elif getattr(eng, "apps", None):
+                self.tabview.set("APP 应用")
             self._set_status("● 扫描完成", GREEN)
         else:
-            self._append_log("未发现任何资产，无需生成报告。", "!")
+            self._append_log("未发现任何资产或线索，无需生成报告。", "!")
             self._set_status("● 未发现资产", ORANGE)
 
     def _on_error(self, tb_text):
