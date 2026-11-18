@@ -1601,6 +1601,34 @@ class TestExternalTools(unittest.TestCase):
 # ----------------------------------------------------------------------------
 # APP / 小程序包静态分析
 # ----------------------------------------------------------------------------
+class TestRegionAliasQuery(unittest.TestCase):
+    def test_full_name_to_province_alias(self):
+        f = cybercensus._region_alias_query
+        self.assertEqual(f("中国移动通信集团四川有限公司"), "四川移动")
+        self.assertEqual(f("中国银行四川省分行"), "四川银行")
+        self.assertEqual(f("四川移动"), "四川移动")
+        self.assertEqual(f("东莞市人民医院"), "")
+        self.assertEqual(f("四川大学华西医院"), "四川大学华西医院")
+
+
+class TestGovCandidateGuard(unittest.TestCase):
+    def test_skip_gov_for_telecom(self):
+        f = cybercensus._gov_candidate_allowed
+        self.assertFalse(f("四川移动", "www.sc.gov.cn"))
+        self.assertTrue(f("某某市教育局", "www.xx.gov.cn"))
+        self.assertTrue(f("四川移动", "wap.sc.10086.cn"))
+
+
+class TestPrioritizeRegion(unittest.TestCase):
+    def test_region_candidates_verified_first(self):
+        cands = [("www.gov.cn", 10), ("wap.sc.10086.cn", 1),
+                 ("www.10086.cn", 5), ("dcp.sc.10086.cn", 2)]
+        out, region = cybercensus._prioritize_region("四川移动", cands)
+        self.assertEqual(out[0][0], "wap.sc.10086.cn")
+        self.assertEqual(region, ["wap.sc.10086.cn", "dcp.sc.10086.cn"])
+        self.assertEqual(out[-1][0], "www.10086.cn")
+
+
 class TestPassiveRegionCandidates(unittest.TestCase):
     def test_prefers_province_candidates(self):
         """纯被动下"四川移动"只取省级候选，不把全国根域 10086.cn 当弱锚点。"""
@@ -1624,6 +1652,34 @@ class TestPassiveRegionCandidates(unittest.TestCase):
         self.assertNotIn("10086.cn", e.domains)
         self.assertNotIn("www.10086.cn", e.domains)
         self.assertTrue({"sc.10086.cn"} <= e.anchor["weak_domains"])
+
+    def test_alias_search_rescues_province_site(self):
+        """全称只搜到集团总部域时，用简称补搜找回省级站点。"""
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5, no_probe=True))
+        e.names = ["中国移动通信集团四川有限公司"]
+        orig_lookup = cybercensus.search_engine_lookup
+        orig_disc = cybercensus.discover_domains_from_search
+        calls = []
+
+        def fake_lookup(q, timeout=15):
+            calls.append(q)
+            return ("", [])
+
+        def fake_disc(name, max_candidates=5, lookup=None):
+            if name.startswith("中国移动"):
+                return [("www.10086.cn", 3)]
+            return [("wap.sc.10086.cn", 3)]
+        cybercensus.search_engine_lookup = fake_lookup
+        cybercensus.discover_domains_from_search = fake_disc
+        self.addCleanup(cybercensus.__setattr__,
+                        "search_engine_lookup", orig_lookup)
+        self.addCleanup(cybercensus.__setattr__,
+                        "discover_domains_from_search", orig_disc)
+        e.discover_names_to_domains()
+        self.assertIn("四川移动", calls)              # 触发了简称补搜
+        self.assertIn("sc.10086.cn", e.domains)
+        self.assertNotIn("10086.cn", e.domains)
 
 
 class TestPackageAnalysis(unittest.TestCase):

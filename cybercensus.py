@@ -256,6 +256,85 @@ PROVINCE_CODES = {
 }
 
 
+_ORG_BOILERPLATE = (
+    "股份有限公司", "有限责任公司", "有限公司", "分公司", "公司",
+    "中国", "中华", "集团", "省", "市", "自治区",
+    "分行", "支行", "营业部", "办事处", "管理局", "委员会",
+)
+# 运营商/金融等行业的第一步就是地域+行业简称（四川移动、四川银行）
+_REGION_ALIAS_KEYS = ("移动", "联通", "电信", "铁塔", "广电", "银行")
+
+
+def _region_alias_query(name):
+    """从全称构造"省份 + 行业词"的补充搜索词。
+
+    "中国移动通信集团四川有限公司" → "四川移动"（不是"四川移动通信"，
+    后者在搜索引擎里会返回省政府等无关站点）
+    用于全称搜索只返回集团总部域（10086.cn）时，补一次简称搜索找回
+    省级站点（wap.sc.10086.cn）。
+    """
+    prov = next((p for p in PROVINCE_CODES if p in name), "")
+    if not prov:
+        return ""
+    for kw in _REGION_ALIAS_KEYS:
+        if kw in name:
+            return prov + kw
+    rest = name.replace(prov, "")
+    for w in _ORG_BOILERPLATE:
+        rest = rest.replace(w, "")
+    rest = rest.strip()
+    return (prov + rest) if len(rest) >= 2 else ""
+
+
+def _host_region_hit(name, host):
+    """候选主机是否带名称里的省份缩写/全拼标签（四川移动 ↔ sc.10086.cn）。"""
+    host = (host or "").lower()
+    labels = set(host.split("."))
+    for prov, codes in PROVINCE_CODES.items():
+        if prov not in name:
+            continue
+        for c in codes:
+            if (len(c) == 2 and c in labels) or (len(c) > 2 and c in host):
+                return True
+    return False
+
+
+def _prioritize_region(name, cands):
+    """把带省份标签的候选排到前面再验证。
+
+    搜索引擎按热度打分时，全国性门户（www.gov.cn / www.10086.cn）会
+    挤掉真正属于该省的站点（wap.sc.10086.cn）——先验证省级候选，
+    避免"候选都验证失败 → 0 资产"。
+    """
+    region, rest = [], []
+    for d, s in cands:
+        (region if _host_region_hit(name, d) else rest).append((d, s))
+    return region + rest, [d for d, _ in region]
+
+
+# 名称含这些词时才允许探测 .gov.cn 候选（四川移动 → www.sc.gov.cn 属于误候选）
+_GOV_OK_WORDS = (
+    "政府", "管理局", "委员会", "法院", "检察院", "公安", "税务", "财政",
+    "人社", "卫生", "健康", "教育", "医院", "疾控", "医保", "公积金",
+    "街道", "乡镇", "学校", "大学", "学院", "中学", "小学", "幼儿园",
+    "图书馆", "文化馆", "体育", "民政", "住建", "交通", "水利", "农业",
+    "发改", "自然资源", "生态环境", "应急", "市场监管", "统计", "审计",
+    "司法", "文旅", "残联", "工会", "团委", "妇联",
+)
+
+
+def _gov_candidate_allowed(name, host):
+    """非政务/公共事业目标不探测 .gov.cn 候选。
+
+    "四川移动" 的省级候选里会混入 www.sc.gov.cn（省政府），探测它既
+    浪费请求也把无关资产带进候选——名称不含政务词时直接跳过。
+    """
+    root = root_domain(host)
+    if not (root == "gov.cn" or root.endswith(".gov.cn")):
+        return True
+    return any(w in (name or "") for w in _GOV_OK_WORDS)
+
+
 def _region_hit(name, host, page_text=""):
     """名称里的省级地名与域名标签的拼音缩写互证（四川移动 ↔ sc.10086.cn）。
 
@@ -282,14 +361,23 @@ def _region_hit(name, host, page_text=""):
 
 
 def _sector_hit(name, text):
-    """名称剔除省级地名/后缀后的行业词是否出现在页面文本（地域互证的配套条件）。"""
+    """名称里的行业词是否出现在页面文本（地域互证的配套条件）。
+
+    运营商/银行先取核心关键词（"中国移动通信集团四川有限公司" → "移动"），
+    否则整串"中国移动通信集团有限公司"几乎不可能出现在页面标题里；
+    其余单位退回"剔除省份+公司后缀"的剩余词严格匹配。
+    """
+    text = text or ""
+    for kw in _REGION_ALIAS_KEYS:
+        if kw in name:
+            return kw in text
     rest = name or ""
     for prov in PROVINCE_CODES:
         rest = rest.replace(prov, "")
     for suffix in ("公司", "分公司", "有限", "省", "市", "区", "县"):
         rest = rest.replace(suffix, "")
     rest = rest.strip()
-    return len(rest) >= 2 and rest in (text or "")
+    return len(rest) >= 2 and rest in text
 
 
 def _bigrams(s):
@@ -1059,6 +1147,12 @@ SEARCH_JUNK_ROOTS = frozenset((
     "tianyancha.com", "qixin.com", "aiqicha.baidu.com", "cnzzla.com",
     "chinaz.com", "aizhan.com", "17ce.com", "boce.com", "ping.pe",
     "whois.com", "whois.net", "alexa.com", "similarweb.com", "wjtcs.cn",
+    # 企业信息/黄页目录（搜索"公司全名"时高发）
+    "11467.com", "huangye88.com", "b2b168.com", "58.com", "ganji.com",
+    "1688.com", "qichacha.com", "shunqi.com", "s.top",
+    # 新闻/中央门户（搜索任意"中国xx集团"都会出现，非目标资产）
+    "www.gov.cn", "people.com.cn", "xinhuanet.com", "chinanews.com.cn",
+    "china.com.cn", "fmprc.gov.cn", "zgbk.com",
     # 视频/电商/工具站
     "bilibili.com", "iqiyi.com", "taobao.com", "jd.com", "pinduoduo.com",
     "alipay.com", "amap.com", "bdimg.com", "bdstatic.com", "bdcdn.network",
@@ -1914,14 +2008,37 @@ class Engine(object):
                 # 而不是只拿全国共用的 www.10086.cn
                 hints = [c for prov, codes in PROVINCE_CODES.items()
                          if prov in name for c in codes]
-
-                def _regionish(host):
-                    labels = set(host.split("."))
-                    return any((len(c) == 2 and c in labels) or
-                               (len(c) > 2 and c in host) for c in hints)
-
-                picked = [d for d, _ in cands if hints and _regionish(d)]
+                picked = [d for d, _ in cands
+                          if hints and _host_region_hit(name, d)]
+                # 全称搜索常常只回集团总部域（10086.cn），补一次简称搜索
+                # （"中国移动通信集团四川有限公司" → "四川移动通信"），
+                # 找回省级站点后再按省份缩写筛选
+                if hints and not picked:
+                    alias = _region_alias_query(name)
+                    if alias and alias != name:
+                        lk2 = search_engine_lookup(alias)
+                        self._absorb_search_text(lk2[0])
+                        more = discover_domains_from_search(
+                            alias, max_candidates=5, lookup=lk2)
+                        # 简称搜索会混入同省其他单位（四川移动通信 → 四川省政府
+                        # sc.gov.cn），只接受与初筛候选同属一个根域的省级站点
+                        known_roots = {root_domain(d) for d, _ in cands}
+                        more_ok = [(d, s) for d, s in more
+                                   if root_domain(d) in known_roots]
+                        seen_c = {d for d, _ in cands}
+                        cands += [(d, s) for d, s in more_ok if d not in seen_c]
+                        picked = [d for d, _ in cands
+                                  if _host_region_hit(name, d)]
+                        if more_ok:
+                            log("全称未命中省级候选，已用简称补充搜索: %s"
+                                % alias, "+")
+                            log("补充搜索结果（同根域）: %s"
+                                % ", ".join("%s(%d分)" % c for c in more_ok))
+                        elif more:
+                            log("简称补充搜索有结果但均非同集团根域，已忽略: %s"
+                                % ", ".join(d for d, _ in more), "!")
                 pool = picked or [d for d, _ in cands]
+                pool = [d for d in pool if _gov_candidate_allowed(name, d)]
                 if picked:
                     log("按省份缩写优先（%s）: %s"
                         % ("/".join(hints), ", ".join(picked)), "+")
@@ -1960,6 +2077,9 @@ class Engine(object):
             if len(name) <= 6:
                 lookups.append(search_engine_lookup(name + " 官网"))
             lookups.append(search_engine_lookup(name + " ICP备案"))
+            alias = _region_alias_query(name)
+            if alias and alias != name:
+                lookups.append(search_engine_lookup(alias))
             text = " ".join(t for t, _ in lookups)
             hosts = [h for _, hs in lookups for h in hs]
             lookup = (text, hosts)
@@ -1967,13 +2087,20 @@ class Engine(object):
             if len(name) <= 4:
                 log("提示：检测到简称（%s），搜索引擎对简称的收录命中率低于全称；"
                     "若结果不全，请改用全称重试（如\"中国移动通信集团四川有限公司\"）。" % name, "!")
-            cands = discover_domains_from_search(name, lookup=lookup)
+            cands = discover_domains_from_search(name, max_candidates=12,
+                                                 lookup=lookup)
             if not cands:
                 log("搜索引擎未找到 %s 的候选域名；建议手动补充域名输入。" % name, "!")
                 continue
+            cands, region = _prioritize_region(name, cands)
             log("搜索引擎候选域名: %s" % ", ".join("%s(%d分)" % c for c in cands))
+            if region:
+                log("省级候选优先验证: %s" % ", ".join(region), "+")
             verified = []
-            for dom, score in cands:
+            for dom, score in cands[:8]:
+                if not _gov_candidate_allowed(name, dom):
+                    log("  跳过非政务目标的政府门户候选: %s" % dom)
+                    continue
                 if self._verify_candidate_domain(name, dom):
                     verified.append(dom)
             if verified:
