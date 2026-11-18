@@ -1052,5 +1052,118 @@ class TestNewReconSources(unittest.TestCase):
         self.assertEqual(srcs["hackertarget"], {})   # 失败源返回空而不崩溃
 
 
+# ----------------------------------------------------------------------------
+# 简称/别名宽松匹配（bootstrap 验证用；分级仍严格）
+# ----------------------------------------------------------------------------
+class TestOrgMatchFuzzy(unittest.TestCase):
+    CASES = [
+        # (名称, 标题, 期望)
+        ("四川移动", "中国移动通信集团四川有限公司", True),   # 简称→全称（目标场景）
+        ("四川移动", "四川移动官方网站", True),
+        ("四川移动", "四川联通", False),
+        ("四川移动", "中国移动", False),
+        ("东莞市人民医院", "东莞市莞城医院", False),          # 同城不同医院必须拒绝
+        ("莞城人民医院", "东莞市莞城人民医院", True),
+        ("广州移动", "中国移动广州公司", True),
+        ("中国移动", "中国移动通信集团四川有限公司", True),   # 集团名扫分公司合理
+    ]
+
+    def test_cases(self):
+        for name, title, expect in self.CASES:
+            self.assertEqual(cybercensus._org_match_fuzzy(name, title), expect,
+                             "%s vs %s" % (name, title))
+
+    def test_short_name_rejected(self):
+        # 短于 4 字的名称不做宽松匹配（防止"移动"这类泛词漫天命中）
+        self.assertFalse(cybercensus._org_match_fuzzy("移动", "中国移动通信集团"))
+
+    def test_verify_uses_fuzzy_for_abbreviation(self):
+        """简称输入 + 全称标题 → bootstrap 验证应通过。"""
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.names = ["四川移动"]
+        orig = cybercensus.http_probe
+        cybercensus.http_probe = lambda host, port, scheme, timeout=8, throttle=0: {
+            "status": 200, "title": "中国移动通信集团四川有限公司",
+            "credit_code": "", "refs": []}
+        orig_cert = cybercensus.tls_cert_info
+        cybercensus.tls_cert_info = lambda h, p, timeout=8: {}
+        self.addCleanup(cybercensus.__setattr__, "http_probe", orig)
+        self.addCleanup(cybercensus.__setattr__, "tls_cert_info", orig_cert)
+        self.assertTrue(e._verify_candidate_domain("四川移动", "www.sc.10086.cn"))
+        self.assertIn("www.sc.10086.cn", e.domains)
+
+
+# ----------------------------------------------------------------------------
+# 简称场景三件套：meta 提取 / 地域拼音互证 / 根域深度守卫
+# ----------------------------------------------------------------------------
+class TestAbbreviationSupport(unittest.TestCase):
+    def test_meta_extraction(self):
+        body = ('<html><head><title></title>'
+                '<meta name="description" content="中国移动通信集团四川有限公司官方网站">'
+                '<meta name="keywords" content="四川移动,移动营业厅"></head></html>')
+        meta = cybercensus._extract_meta(body)
+        self.assertIn("中国移动通信集团四川有限公司", meta)
+
+    def test_region_hit(self):
+        # 地域拼音 + 行业词双重核验
+        self.assertTrue(cybercensus._region_hit("四川移动", "wap.sc.10086.cn", "中国移动APP"))
+        self.assertTrue(cybercensus._region_hit("广东电信", "gd.189.cn", "广东电信官方"))
+        self.assertTrue(cybercensus._region_hit("四川移动", "www.sichuan.10086.cn", "移动营业厅"))
+        # 关键守护：省政府站不含"移动"行业词 → 必须拒绝
+        self.assertFalse(cybercensus._region_hit("四川移动", "www.sc.gov.cn", "四川省人民政府"))
+        # 两字母缩写必须独立标签，不能命中 school 里的 sc
+        self.assertFalse(cybercensus._region_hit("四川移动", "www.school.com", "移动"))
+        # 名称里没有省份就不做地域互证
+        self.assertFalse(cybercensus._region_hit("中国移动", "sc.10086.cn", "中国移动"))
+
+    def test_verify_via_meta_for_spa(self):
+        """SPA 站标题为空，meta 描述含单位名 → 验证通过。"""
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.names = ["中国移动通信集团四川有限公司"]
+        orig = cybercensus.http_probe
+        cybercensus.http_probe = lambda host, port, scheme, timeout=8, throttle=0: {
+            "status": 200, "title": "", "meta": "中国移动通信集团四川有限公司",
+            "credit_code": "", "refs": []}
+        self.addCleanup(cybercensus.__setattr__, "http_probe", orig)
+        self.assertTrue(e._verify_candidate_domain("中国移动通信集团四川有限公司",
+                                                   "www.10086.cn"))
+
+    def test_verify_via_region_for_abbreviation(self):
+        """简称 + 省级拼音域名（wap.sc.10086.cn）+ 页面含行业词 → 验证通过。"""
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.names = ["四川移动"]
+        orig = cybercensus.http_probe
+        cybercensus.http_probe = lambda host, port, scheme, timeout=8, throttle=0: {
+            "status": 200, "title": "中国移动APP", "meta": "",
+            "credit_code": "", "refs": []}
+        self.addCleanup(cybercensus.__setattr__, "http_probe", orig)
+        self.assertTrue(e._verify_candidate_domain("四川移动", "wap.sc.10086.cn"))
+
+    def test_verify_rejects_gov_for_abbreviation(self):
+        """省政府站（sc.gov.cn）不含行业词"移动" → 地域互证必须拒绝。"""
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.names = ["四川移动"]
+        orig = cybercensus.http_probe
+        cybercensus.http_probe = lambda host, port, scheme, timeout=8, throttle=0: {
+            "status": 200, "title": "四川省人民政府", "meta": "四川省人民政府办公厅",
+            "credit_code": "", "refs": []}
+        orig_cert = cybercensus.tls_cert_info
+        cybercensus.tls_cert_info = lambda h, p, timeout=8: {}
+        self.addCleanup(cybercensus.__setattr__, "http_probe", orig)
+        self.addCleanup(cybercensus.__setattr__, "tls_cert_info", orig_cert)
+        self.assertFalse(e._verify_candidate_domain("四川移动", "www.sc.gov.cn"))
+
+    def test_root_depth_guard(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        # 深度 1：补根域（常规企业域名）
+        e._add_verified_domain("www.dggcyy.cn")
+        self.assertIn("dggcyy.cn", e.domains)
+        # 深度 2：只补省级父域，不补集团根域
+        e._add_verified_domain("wap.sc.10086.cn")
+        self.assertIn("wap.sc.10086.cn", e.domains)
+        self.assertIn("sc.10086.cn", e.domains)
+        self.assertNotIn("10086.cn", e.domains)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

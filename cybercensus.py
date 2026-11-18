@@ -231,6 +231,83 @@ def _org_match(a, b, min_sub=6):
     return len(short) >= min_sub and short in long_
 
 
+# 省级行政区 → 域名里常见的拼音缩写 / 全拼（运营商、银行、政府的省级站规律：
+# 四川移动 = sc.10086.cn，广东电信 = gd.189.cn……）
+PROVINCE_CODES = {
+    "北京": ("bj", "beijing"), "天津": ("tj", "tianjin"), "河北": ("he", "hebei"),
+    "山西": ("sx", "shanxi"), "内蒙古": ("nm", "neimenggu", "nmg"),
+    "辽宁": ("ln", "liaoning"), "吉林": ("jl", "jilin"),
+    "黑龙江": ("hl", "hlj", "heilongjiang"), "上海": ("sh", "shanghai"),
+    "江苏": ("js", "jiangsu"), "浙江": ("zj", "zhejiang"), "安徽": ("ah", "anhui"),
+    "福建": ("fj", "fujian"), "江西": ("jx", "jiangxi"), "山东": ("sd", "shandong"),
+    "河南": ("ha", "henan"), "湖北": ("hb", "hubei"), "湖南": ("hn", "hunan"),
+    "广东": ("gd", "guangdong"), "广西": ("gx", "guangxi"), "海南": ("hi", "hainan"),
+    "重庆": ("cq", "chongqing"), "四川": ("sc", "sichuan"), "贵州": ("gz", "guizhou"),
+    "云南": ("yn", "yunnan"), "西藏": ("xz", "xizang", "tibet"),
+    "陕西": ("sn", "shaanxi", "sx"), "甘肃": ("gs", "gansu"),
+    "青海": ("qh", "qinghai"), "宁夏": ("nx", "ningxia"),
+    "新疆": ("xj", "xinjiang"), "台湾": ("tw", "taiwan"),
+    "香港": ("hk", "hongkong"), "澳门": ("mo", "macau", "macao"),
+}
+
+
+def _region_hit(name, host, page_text=""):
+    """名称里的省级地名与域名标签的拼音缩写互证（四川移动 ↔ sc.10086.cn）。
+
+    必须配合行业词核验（见 _sector_hit）：单独的地域命中会误伤——
+    "四川移动" 会命中任何 sc.* 的四川站点（如 www.sc.gov.cn 省政府），
+    所以要求名称剔除省份后的行业词（"移动"）同时出现在页面文本中。
+    """
+    host = (host or "").lower()
+    labels = set(host.split("."))
+    region_ok = False
+    for prov, codes in PROVINCE_CODES.items():
+        if prov not in name:
+            continue
+        for c in codes:
+            # 两字母缩写只认"独立标签"（防 school 里的 sc）；全拼允许子串
+            if (len(c) == 2 and c in labels) or (len(c) > 2 and c in host):
+                region_ok = True
+                break
+        if region_ok:
+            break
+    if not region_ok:
+        return False
+    return _sector_hit(name, page_text)
+
+
+def _sector_hit(name, text):
+    """名称剔除省级地名/后缀后的行业词是否出现在页面文本（地域互证的配套条件）。"""
+    rest = name or ""
+    for prov in PROVINCE_CODES:
+        rest = rest.replace(prov, "")
+    for suffix in ("公司", "分公司", "有限", "省", "市", "区", "县"):
+        rest = rest.replace(suffix, "")
+    rest = rest.strip()
+    return len(rest) >= 2 and rest in (text or "")
+
+
+def _bigrams(s):
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def _org_match_fuzzy(a, b, min_cov=0.6, min_len=4):
+    """简称/别名场景的宽松组织名匹配：bigram 覆盖率 ≥ min_cov。
+
+    用于**候选验证阶段**（bootstrap 探索"这个域名是不是它的"），不用于分级——
+    "四川移动" → "中国移动通信集团四川有限公司"：{四川,移动} 均命中，覆盖 67%；
+    "东莞市人民医院" vs "东莞市莞城医院"：覆盖 50% 被拒（防同城不同医院误配）。
+    分级判定（evaluate）仍走严格的 _org_match，防止宽松匹配污染"确认"。
+    """
+    na, nb = _norm_org(a), _norm_org(b)
+    if not na or not nb or len(na) < min_len:
+        return False
+    ga = _bigrams(na)
+    if not ga:
+        return False
+    return len(ga & _bigrams(nb)) / len(ga) >= min_cov
+
+
 def _org_related(a, b):
     """宽松版组织名关联（双向包含即可）：用于 IP 归属 org 与用户主体名称的相互印证。
 
@@ -327,6 +404,17 @@ def http_get(url, timeout=15, retries=2, headers=None, binary=False,
     raise last_err
 
 
+def _extract_meta(body):
+    """提取页面 meta 描述/关键词/应用名——SPA 站标题为空时的关键互证文本。"""
+    parts = []
+    for m in re.finditer(
+            r'<meta[^>]+(?:name|property)\s*=\s*["\']'
+            r'(?:description|keywords|og:title|application-name)["\'][^>]*?'
+            r'content\s*=\s*["\']([^"\']+)', body or "", re.I):
+        parts.append(m.group(1))
+    return (" ".join(parts))[:600]
+
+
 def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     """返回 dict：status/title/server/powered/beian/analytics/favicon/tech/body_len"""
     if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
@@ -336,7 +424,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
 
     out = {"url": url, "status": "", "title": "", "server": "",
            "powered": "", "beian": "", "analytics": "", "favicon": "",
-           "tech": "", "body_len": 0, "credit_code": "", "refs": []}
+           "tech": "", "body_len": 0, "credit_code": "", "refs": [], "meta": ""}
     body = ""
     status = ""
     hdrs = {}
@@ -372,6 +460,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     if mb:
         out["beian"] = mb.group(1)
     out["credit_code"] = extract_credit_code(body)   # 页脚常印统一社会信用代码
+    out["meta"] = _extract_meta(body)                # SPA 站的单位名常在 meta 里
     # 页面外链/JS 引用的域名（文档 5.2 前端深挖金矿）：候选资产线索
     out["refs"] = [m.group(1) for m in _DOMAIN_IN_TEXT_RE.finditer(body)]
 
@@ -1377,12 +1466,21 @@ class Engine(object):
                     log("搜索引擎未找到 %s 的候选域名。" % name, "!")
             return
         for name in self.names:
-            # 一次搜索双用：候选域名 + 摘要里的统一社会信用代码（A 级锚点）
-            lookup = search_engine_lookup(name)
-            code = extract_credit_code(lookup[0])
+            # 搜索双用：候选域名 + 摘要里的统一社会信用代码（A 级锚点）。
+            # 简称/短名（如"四川移动"）补一轮"官网"查询提高命中率
+            lookups = [search_engine_lookup(name)]
+            if len(name) <= 6:
+                lookups.append(search_engine_lookup(name + " 官网"))
+            text = " ".join(t for t, _ in lookups)
+            hosts = [h for _, hs in lookups for h in hs]
+            lookup = (text, hosts)
+            code = extract_credit_code(text)
             if code:
                 self.anchor["credit_codes"].add(code)
                 log("搜索摘要发现统一社会信用代码: %s（法定唯一标识，A 级锚点）" % code, "+")
+            if len(name) <= 4:
+                log("提示：检测到简称（%s），搜索引擎对简称的收录命中率低于全称；"
+                    "若结果不全，请改用全称重试（如\"中国移动通信集团四川有限公司\"）。" % name, "!")
             cands = discover_domains_from_search(name, lookup=lookup)
             if not cands:
                 log("搜索引擎未找到 %s 的候选域名；建议手动补充域名输入。" % name, "!")
@@ -1401,15 +1499,27 @@ class Engine(object):
         """探测候选域名首页，标题 / 证书 O= / 统一社会信用代码 任一互证即通过。
 
         互证对象 = 主体名称 ∪ 锚点组织名（纯域名输入时也能用证书 O= 印证）。
+        匹配用严格子串 OR 简称宽松匹配（bigram 覆盖率）——"四川移动"这类
+        简称能匹配到"中国移动通信集团四川有限公司"，避免简称场景整体失效。
         """
         anchor_codes = set(self.anchor.get("credit_codes") or ())
         names = set(self.names) | set(self.anchor.get("orgs") or ())
+
+        def _hit(text):
+            return any(n and (_org_match(n, text) or _org_match_fuzzy(n, text))
+                       for n in names)
+
         for scheme, port in (("https", 443), ("http", 80)):
             info = http_probe(dom, port, scheme, timeout=self.args.timeout)
             if info.get("status") in ("", None):
                 continue
-            title = info.get("title", "") or ""
-            if any(n and _org_match(n, title) for n in names):
+            # 标题 + meta 描述一起验证（SPA 站标题常为空，单位名在 description 里）
+            page_text = (info.get("title") or "") + " " + (info.get("meta") or "")
+            if _hit(page_text):
+                self._add_verified_domain(dom)
+                return True
+            # 地域拼音互证 + 行业词核验：四川移动 ↔ sc.10086.cn（页面须含"移动"）
+            if any(n and _region_hit(n, dom, page_text) for n in names):
                 self._add_verified_domain(dom)
                 return True
             # 页面含锚点信用代码：文档 7.2 的 A 级证据，直接确认
@@ -1419,21 +1529,29 @@ class Engine(object):
             if scheme == "https":
                 cert = tls_cert_info(dom, port, timeout=self.args.timeout)
                 org = (cert or {}).get("org", "")
-                if org and any(n and _org_match(n, org) for n in names):
+                if org and _hit(org):
                     self._add_verified_domain(dom)
                     return True
         return False
 
     def _add_verified_domain(self, dom):
-        """验证通过的域名：主机名与根域名都入锚点。
+        """验证通过的域名：主机名入锚点，并按深度补充上级域用于子域枚举。
 
-        根域名必须加——子域枚举（crt.sh/hackertarget）按根域查才能拿到
-        全部子域；只枚举 www.xxx.cn 这一个主机名会漏掉其它子站。
+        - www.x.cn（深度 1）→ 补根域 x.cn：子域枚举按根域查才全
+        - wap.sc.10086.cn（深度 2）→ 只补 sc.10086.cn，**不补根域 10086.cn**：
+          根域是整个移动集团的（各省公司共用），当锚点会把全国资产都卷进来
         """
         self.domains.add(dom)
         root = root_domain(dom)
-        if root and root != dom:
+        if not root or root == dom:
+            return
+        depth = dom.count(".") - root.count(".")
+        if depth <= 1:
             self.domains.add(root)
+        else:
+            parent = dom.split(".", 1)[1]   # 去掉最左标签：wap.sc.10086.cn → sc.10086.cn
+            if parent and parent != root:
+                self.domains.add(parent)
 
     # ---- 1. 锚点建立 ----
     def build_anchors(self, probe=True):
@@ -1537,6 +1655,9 @@ class Engine(object):
                 else:
                     allsubs |= set(items)
             allsubs.add(d)
+            if len(allsubs) > 500:
+                log("  子域过多（%d），仅取前 500 个（大集团域名常见）" % len(allsubs), "!")
+                allsubs = set(sorted(allsubs)[:500])
             for h in allsubs:
                 ip = ht.get(h, "")
                 if ip:
