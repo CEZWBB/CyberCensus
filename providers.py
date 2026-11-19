@@ -273,12 +273,6 @@ def make_record(provider, match_kind, raw):
     }
 
 
-def asset_key(rec):
-    if rec.get("host"):
-        return "%s:%s" % (rec["host"].lower(), rec.get("port") or "")
-    return "%s:%s" % (rec.get("ip") or "", rec.get("port") or "")
-
-
 # ----------------------------------------------------------------------------
 # 平台基类
 # ----------------------------------------------------------------------------

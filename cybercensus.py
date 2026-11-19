@@ -2119,20 +2119,6 @@ def grab_banner(ip, port, timeout=3):
         return ""
 
 
-def scan_ports(host, ports, threads=50, timeout=2.5):
-    opened = []
-    with ThreadPoolExecutor(max_workers=min(threads, max(1, len(ports)))) as ex:
-        futs = {ex.submit(tcp_open, host, p, timeout): p for p in ports}
-        for f in as_completed(futs):
-            p = futs[f]
-            try:
-                if f.result():
-                    opened.append(p)
-            except Exception:
-                pass
-    return sorted(opened)
-
-
 # HTTP 探测端口表：与 DEFAULT_PORTS 的 web 端口保持一致，
 # 否则扫描发现开放（如 5000/7001/7002/888）却永远不做 HTTP 探测，拿不到页面证据
 WEB_PORTS = frozenset((
@@ -2286,6 +2272,7 @@ class Engine(object):
         self.domains = set()
         self.input_ips = set()
         self.spf_ips = set()      # SPF ip4:（第三方发信 IP，仅记录，不扫描不查询）
+        # 说明：spf_ips 只进日志和 JSON meta，供人工研判，不参与扫描/查询
         self.assets = {}          # (host, port) -> Asset
         self.sub_map = {}         # host -> ip (被动得到)
         self.anchor = {"orgs": set(), "beian": set(), "analytics": set(),
@@ -2308,7 +2295,6 @@ class Engine(object):
         self.ext_hits = []              # 外部工具 nuclei 命中 [(模板, 级别, 名称, 位置), ...]
         self.ext_used = {}              # 本轮实际调用的外部工具 {名称: 路径}
         self.ext_detected = set()       # 本机检测到的外部工具（含本轮未调用的）
-        self.rejected = []        # 被剔除的资产（含原因）
 
     # ---- 资产登记 ----
     def add_asset(self, host, port=None, scheme=None, source="", ip=None):
@@ -3983,6 +3969,7 @@ class Engine(object):
                 "input_ips": sorted(self.input_ips),
                 "anchor": {k: sorted(v) for k, v in self.anchor.items()},
                 "ip_notes": self.ip_notes,
+                "spf_ips": sorted(self.spf_ips),
                 "provider_stats": self.provider_stats,
                 "provider_records": len(self.provider_records),
                 "counts": {k: len(v) for k, v in groups.items()},
@@ -5271,10 +5258,6 @@ def main():
         print("报告：%s" % md_path)
     print("=" * 64)
     return 0
-
-
-class _LightProbeMixin:
-    pass
 
 
 if __name__ == "__main__":
