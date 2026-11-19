@@ -144,6 +144,8 @@ pyinstaller --onefile --windowed --collect-all customtkinter --collect-all pypin
 |------|------|------|
 | A/B/C 分级 | A≥1 或 B≥2 → 确认；B=1 或 C≥1 → 疑似；否 → 剔除 | 开 |
 | 白话归属说明 | 每条资产为什么算它的，用非技术语言写清楚 | 开 |
+| 官方唯一标识 | 政府网站标识码 / 公安联网备案号（A 级证据） | 开 |
+| 联系信息证据 | 邮箱/电话/页脚主办单位/互链（B 级证据） | 开 |
 | 增量监控 | 留 `baseline.json`，下轮对比新增/变化/下线 | 开 |
 | Webhook | 扫描完成/发现新增时推钉钉/企微/飞书 | 关（`--webhook`） |
 | 报告格式 | HTML（带关系图，推荐交付）/ PDF / Word(DOCX) / TXT / MD / CSV / JSON | 界面默认 HTML+MD+CSV；PDF/Word/TXT 可勾选，每个格式在对话框里有用途说明 |
@@ -444,6 +446,7 @@ run.bat -d xx.gov.cn
 | 级别 | 证据 | 来源 |
 |------|------|------|
 | **A 强证据** | 页面备案号一致 | 页面 → 锚点备案号 |
+| **A 强证据** | 政府网站标识码 / 公安联网备案号一致 | 页面页脚（单位级唯一标识） |
 | **A 强证据** | 证书 `O=` 组织名一致 | TLS 证书 / crt.sh |
 | **A 强证据** | 已知主域名的子域 | 域名归属 |
 | **A 强证据** | 平台 `cert` 命中（证书含主域名） | 平台返回 |
@@ -502,7 +505,7 @@ confidence, host, ip, port, scheme, status, title, server, tech,
 cert_org, cert_san, beian, analytics, favicon,
 providers, prov_kinds, prov_beian, prov_cert, prov_org,
 source, evidence, reject_reason, urls, plain, findings,
-emails, phones, authorities, refs
+emails, phones, authorities, refs, site_code, police_beian
 ```
 
 ---

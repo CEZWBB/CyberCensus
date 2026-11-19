@@ -1653,6 +1653,21 @@ class TestContactEvidence(unittest.TestCase):
         self.assertTrue(any("邮箱" in x for x in a.evidence))
         self.assertTrue(any("电话" in x for x in a.evidence))
 
+    def test_site_code_and_police_beian(self):
+        html = "网站标识码：4403000001 粤公网安备 44030402000001号"
+        self.assertEqual(cybercensus.SITE_CODE_RE.search(html).group(1),
+                         "4403000001")
+        self.assertEqual(cybercensus.POLICE_BEIAN_RE.search(html).group(1),
+                         "44030402000001")
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.anchor["site_codes"] = {"4403000001"}
+        a = e.add_asset("www.other.com", 80, "http", source="test")
+        a.site_code = "4403000001"
+        e.evaluate()
+        self.assertEqual(a.confidence, "确认")
+        self.assertTrue(any("网站标识码" in x for x in a.evidence))
+
     def test_reciprocal_link_evidence(self):
         e = cybercensus.Engine(argparse.Namespace(
             beian="", threads=10, timeout=5))

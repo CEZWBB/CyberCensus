@@ -222,6 +222,10 @@ PRIVACY_ORG_MARKERS = (
 )
 
 
+SITE_CODE_RE = re.compile(r"网站标识码[\s:：]*(\d{8,12})")
+POLICE_BEIAN_RE = re.compile(r"公网安备[\s:：]*(\d{8,20})号?")
+
+
 def _norm_org(s):
     """组织名归一化：NFKC（全角→半角）+ 去空白/中点/常见标点 + 小写。"""
     s = unicodedata.normalize("NFKC", s or "")
@@ -1136,6 +1140,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     out = {"url": url, "status": "", "title": "", "server": "",
            "powered": "", "beian": "", "analytics": "", "favicon": "",
            "tech": "", "body_len": 0, "credit_code": "", "refs": [], "meta": "",
+           "site_code": "", "police_beian": "",
            "emails": [], "phones": [], "authorities": [],
            "scripts": [], "waf": ""}
     body = ""
@@ -1172,6 +1177,12 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     mb = BEIAN_RE.search(body)
     if mb:
         out["beian"] = mb.group(1)
+    ms = SITE_CODE_RE.search(body)
+    if ms:
+        out["site_code"] = ms.group(1)
+    mp = POLICE_BEIAN_RE.search(body)
+    if mp:
+        out["police_beian"] = mp.group(1)
     out["credit_code"] = extract_credit_code(body)   # 页脚常印统一社会信用代码
     out["meta"] = _extract_meta(body)                # SPA 站的单位名常在 meta 里
     out["emails"] = _extract_emails(body)            # 页面联系邮箱
@@ -2257,7 +2268,8 @@ class Asset(object):
                  "analytics", "favicon", "source", "evidence", "confidence",
                  "error", "prov_kinds", "providers", "prov_beian", "prov_cert",
                  "prov_org", "reject_reason", "urls", "findings", "credit_code",
-                 "emails", "phones", "authorities", "refs")
+                 "emails", "phones", "authorities", "refs",
+                 "site_code", "police_beian")
 
     def __init__(self, host, port=None, scheme=None):
         self.host = host
@@ -2291,6 +2303,8 @@ class Asset(object):
         self.phones = set()       # 页面联系电话
         self.authorities = set()  # 页脚主办/版权单位
         self.refs = set()         # 页面引用的外部域名（互链证据）
+        self.site_code = ""       # 政府网站标识码
+        self.police_beian = ""    # 公安联网备案号
 
     def key(self):
         p = self.port or (443 if self.scheme == "https" else 80 if self.scheme == "http" else "")
@@ -2313,7 +2327,7 @@ def _merge_assets(dst, src):
         getattr(dst, s).update(getattr(src, s))
     for s in ("ip", "title", "server", "scheme", "status", "beian", "prov_beian",
               "prov_cert", "prov_org", "cert_org", "cert_san", "analytics",
-              "favicon", "credit_code"):
+              "favicon", "credit_code", "site_code", "police_beian"):
         if not getattr(dst, s):
             setattr(dst, s, getattr(src, s))
 
@@ -2530,7 +2544,8 @@ class Engine(object):
         self.anchor = {"orgs": set(), "beian": set(), "analytics": set(),
                        "favicon": set(), "ips": set(), "domains": set(),
                        "weak_domains": set(), "credit_codes": set(),
-                       "emails": set(), "phones": set(), "authorities": set()}
+                       "emails": set(), "phones": set(), "authorities": set(),
+                       "site_codes": set(), "police_beians": set()}
         self.ip_notes = {}        # ip -> info dict
         self.provider_records = []
         self.provider_stats = {}
@@ -2826,7 +2841,8 @@ class Engine(object):
     def _remember_asset(self, dom, info):
         """把候选验证时的页面信息落到资产上，供 evaluate 做联系信息证据判定。"""
         a = self.add_asset(dom, None, None, source="verify")
-        for k in ("title", "server", "beian", "credit_code"):
+        for k in ("title", "server", "beian", "credit_code",
+                  "site_code", "police_beian"):
             v = info.get(k)
             if v and not getattr(a, k):
                 setattr(a, k, v)
@@ -2994,9 +3010,17 @@ class Engine(object):
                 a.phones.update(info.get("phones") or [])
                 a.authorities.update(info.get("authorities") or [])
                 a.refs.update(info.get("refs") or [])
+                if not a.site_code:
+                    a.site_code = info.get("site_code", "")
+                if not a.police_beian:
+                    a.police_beian = info.get("police_beian", "")
                 self.anchor["emails"].update(a.emails)
                 self.anchor["phones"].update(a.phones)
                 self.anchor["authorities"].update(a.authorities)
+                if a.site_code:
+                    self.anchor["site_codes"].add(a.site_code)
+                if a.police_beian:
+                    self.anchor["police_beians"].add(a.police_beian)
                 self._js_urls.extend(info.get("scripts") or [])
                 self._apply_waf(a, info.get("waf", ""))
                 if a.analytics:
@@ -3394,6 +3418,10 @@ class Engine(object):
                 a.phones.update(info.get("phones") or [])
                 a.authorities.update(info.get("authorities") or [])
                 a.refs.update(info.get("refs") or [])
+                if not a.site_code:
+                    a.site_code = info.get("site_code", "")
+                if not a.police_beian:
+                    a.police_beian = info.get("police_beian", "")
                 self._js_urls.extend(info.get("scripts") or [])
                 self._apply_waf(a, info.get("waf", ""))
                 if cert:
@@ -3623,6 +3651,13 @@ class Engine(object):
                 A += 1
             if a.credit_code and a.credit_code in self.anchor["credit_codes"]:
                 ev.append("A|页面含统一社会信用代码:%s" % a.credit_code)
+                A += 1
+            if a.site_code and a.site_code in self.anchor["site_codes"]:
+                ev.append("A|网站标识码一致:%s" % a.site_code)
+                A += 1
+            if (a.police_beian
+                    and a.police_beian in self.anchor["police_beians"]):
+                ev.append("A|公安备案号一致:%s" % a.police_beian)
                 A += 1
             if a.cert_org and any(_org_match(o, a.cert_org) for o in orgs):
                 ev.append("A|证书O=一致:%s" % a.cert_org)
@@ -4413,7 +4448,8 @@ class Engine(object):
                 "server", "tech", "cert_org", "cert_san", "beian", "analytics",
                 "favicon", "providers", "prov_kinds", "prov_beian", "prov_cert",
                 "prov_org", "source", "evidence", "reject_reason", "urls",
-                "plain", "findings", "emails", "phones", "authorities", "refs"]
+                "plain", "findings", "emails", "phones", "authorities", "refs",
+                "site_code", "police_beian"]
 
         def write_csv(path, items):
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -4436,6 +4472,7 @@ class Engine(object):
                         ";".join(sorted(a.phones)),
                         ";".join(sorted(a.authorities)),
                         ";".join(sorted(a.refs)),
+                        a.site_code, a.police_beian,
                     ])
 
         # 输出格式选择（--formats / 界面开关）：md / csv / json；未指定=全出
@@ -5501,6 +5538,8 @@ def html_to_pdf(html_path, pdf_path, timeout=90):
 _PLAIN_EVIDENCE = (
     ("A|页面备案号一致", "网站页脚的ICP备案号与目标单位备案号一致"),
     ("A|页面含统一社会信用代码", "页面中含有目标单位的统一社会信用代码（法定唯一标识）"),
+    ("A|网站标识码一致", "页脚的政府网站标识码与目标官网一致"),
+    ("A|公安备案号一致", "页脚的公安联网备案号与目标官网一致"),
     ("A|证书O=一致", "该站HTTPS证书的持有单位就是目标单位"),
     ("A|主域名子域", "是目标单位主域名的子域名"),
     ("A|平台cert命中", "测绘平台证书库显示该站证书含目标单位信息"),
