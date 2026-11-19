@@ -1466,8 +1466,13 @@ class TestExternalTools(unittest.TestCase):
 
     def test_missing_binary_returns_empty(self):
         orig_which = cybercensus.shutil.which
+        orig_base = cybercensus._base_dir
+        empty = tempfile.mkdtemp()
         cybercensus.shutil.which = lambda n: None
+        cybercensus._base_dir = lambda: empty
         self.addCleanup(cybercensus.shutil.__setattr__, "which", orig_which)
+        self.addCleanup(cybercensus.__setattr__, "_base_dir", orig_base)
+        self.addCleanup(shutil.rmtree, empty, True)
         self.assertEqual(cybercensus.run_subfinder("x.com"), set())
         self.assertEqual(cybercensus.run_httpx(["x.com"]), [])
         self.assertEqual(cybercensus.run_wafw00f("https://x.com"), "")
