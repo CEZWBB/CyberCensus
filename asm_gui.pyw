@@ -147,7 +147,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
                formats=None, sensitive=None, probe_interval=0.0, webhook="",
-               ext=True, packages=None, intel="", fast=False):
+               ext=True, packages=None, intel="", fast=False, paths=True):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
@@ -194,6 +194,8 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         app_packages=list(packages or []),
         intel=intel or "",
         fast=bool(fast),
+        no_paths=not bool(paths),
+        path_limit=30,
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
@@ -631,7 +633,7 @@ class App(ctk.CTk):
     def _build_advanced_dialog(self):
         win = ctk.CTkToplevel(self)
         win.title("高级参数 · CyberCensus")
-        win.geometry("800x490")
+        win.geometry("800x540")
         win.configure(fg_color=BG)
         win.withdraw()
         win.protocol("WM_DELETE_WINDOW", win.withdraw)
@@ -722,7 +724,13 @@ class App(ctk.CTk):
         ctk.CTkSwitch(f, text="极速模式：跳过慢速阶段、缩短超时、提高并发（覆盖会下降）",
                       variable=self.var_fast, progress_color=ORANGE
                       ).grid(row=7, column=0, columnspan=6, sticky="w",
-                             padx=(14, 0), pady=(8, 10))
+                             padx=(14, 0), pady=(8, 4))
+
+        self.var_paths = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(f, text="采集路径线索：robots.txt / sitemap.xml / 前端 JS API（主动 GET）",
+                      variable=self.var_paths, progress_color=ACCENT
+                      ).grid(row=8, column=0, columnspan=6, sticky="w",
+                             padx=(14, 0), pady=(0, 10))
 
         ctk.CTkLabel(win, text="提示：平台翻页越多越慢、越费配额；全端口扫描建议仅在授权窗口期使用。",
                      font=self.f_mono_sm, text_color=GRAY
@@ -986,6 +994,7 @@ class App(ctk.CTk):
             packages=packages,
             intel=self.var_intel.get().strip(),
             fast=self.var_fast.get(),
+            paths=self.var_paths.get(),
         )
         self._last_out_dir = args.out
 

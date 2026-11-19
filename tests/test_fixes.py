@@ -1628,6 +1628,89 @@ class TestOperatorCandidates(unittest.TestCase):
             "川移", "wap.sc.10086.cn", "中国移动APP"))
 
 
+class TestPathHarvest(unittest.TestCase):
+    def test_parse_robots(self):
+        txt = ("User-agent: *\n"
+               "Disallow: /admin/\n"
+               "Allow: /public\n"
+               "Disallow: /*.pdf$\n"
+               "Disallow: /\n"
+               "Sitemap: https://x.com/sitemap.xml\n")
+        self.assertEqual(cybercensus.parse_robots(txt), ["/admin/", "/public"])
+
+    def test_parse_sitemap(self):
+        xml = ('<?xml version="1.0"?><urlset>'
+               '<url><loc>https://x.com/portal/list</loc></url>'
+               '<url><loc>https://x.com/api/v1/query?x=1</loc></url>'
+               '<url><loc>https://x.com/sitemap2.xml</loc></url>'
+               '</urlset>')
+        self.assertEqual(cybercensus.parse_sitemap(xml),
+                         ["/portal/list", "/api/v1/query"])
+
+    def test_extract_js_paths(self):
+        js = ('fetch("/api/v1/users"); var a="/static/app.js";'
+              'url: "https://x.com/admin/login"; var b="/";'
+              'var c="/download/file.pdf";')
+        out = cybercensus.extract_js_paths(js)
+        self.assertIn("/api/v1/users", out)
+        self.assertIn("/admin/login", out)
+        self.assertNotIn("/static/app.js", out)
+        self.assertNotIn("/download/file.pdf", out)
+
+    def test_harvest_paths_records_and_dedupes(self):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        a = e.add_asset("x.com", 443, "https", source="anchor")
+        a.status = "200"
+        orig = cybercensus.http_get
+
+        def fake(url, **kw):
+            if "robots" in url:
+                return ("User-agent: *\nDisallow: /admin/\n"
+                        "Sitemap: https://x.com/sitemap.xml\n")
+            if "sitemap" in url:
+                return ("<urlset><url><loc>https://x.com/api/v1/list</loc>"
+                        "</url></urlset>")
+            return ""
+        cybercensus.http_get = fake
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        e.harvest_paths()
+        self.assertIn(("x.com", "/admin/", "robots"), e.web_paths)
+        self.assertIn(("x.com", "/api/v1/list", "sitemap"), e.web_paths)
+
+    def test_wayback_urls_paths(self):
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda url, **kw: json.dumps([
+            ["original"],
+            ["https://x.com/admin/login"],
+            ["https://x.com/"],
+            ["https://other.com/a"],
+            ["https://sub.x.com/api/v1?a=1"],
+        ])
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        self.assertEqual(cybercensus.wayback_urls("x.com"),
+                         [("x.com", "/admin/login"),
+                          ("sub.x.com", "/api/v1")])
+
+    def test_mine_wayback_paths_records(self):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.anchor["domains"] = {"x.com"}
+        orig = cybercensus.wayback_urls
+        cybercensus.wayback_urls = lambda d, timeout=25, limit=1000: [
+            ("x.com", "/old-admin/")]
+        self.addCleanup(cybercensus.__setattr__, "wayback_urls", orig)
+        e.mine_wayback_paths()
+        self.assertIn(("x.com", "/old-admin/", "wayback"), e.web_paths)
+
+    def test_no_paths_switch(self):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5, no_paths=True))
+        e.add_asset("x.com", 443, "https", source="anchor")
+        e.harvest_paths()
+        self.assertEqual(e.web_paths, set())
+
+
 class TestFastMode(unittest.TestCase):
     def test_applies_limits_and_reports_skips(self):
         args = argparse.Namespace(

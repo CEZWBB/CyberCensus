@@ -919,6 +919,93 @@ def _extract_scripts(body, base_url, limit=8):
     return out
 
 
+# ----------------------------------------------------------------------------
+# 路径/接口线索采集（不靠大字典）：robots.txt / sitemap.xml / 前端 JS
+#
+# 暴露面不只是"主机"，未公开的目录、后台入口、API 路径同样是资产。
+# 这些路径由目标自己公开（robots/sitemap）或前端代码硬编码（JS），
+# 信噪比远高于目录爆破；只记录线索，不主动探测每个路径。
+# ----------------------------------------------------------------------------
+_STATIC_PATH_EXT = (
+    ".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+    ".webp", ".bmp", ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp4",
+    ".mp3", ".avi", ".mkv", ".wav", ".ogg", ".pdf", ".zip", ".rar", ".7z",
+)
+_JS_PATH_RE = re.compile(
+    r"""["'`]((?:https?://[^"'`\s]+)?/[^"'`\s<>]{2,180})["'`]""")
+
+
+def parse_robots(text):
+    """解析 robots.txt 的 Allow/Disallow 路径（去掉通配/空/根路径）。"""
+    out, seen = [], set()
+    for line in (text or "").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        if key.strip().lower() not in ("allow", "disallow"):
+            continue
+        p = val.strip()
+        if not p or p in ("*", "/") or "*" in p or "$" in p:
+            continue
+        if not p.startswith("/"):
+            p = "/" + p
+        if len(p) > 200 or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out[:200]
+
+
+def parse_sitemap(text, limit=300):
+    """解析 sitemap.xml 的 <loc>，返回路径（忽略 sitemap 索引文件本身）。"""
+    out, seen = [], set()
+    for m in re.finditer(r"<loc>\s*([^<\s]+)\s*</loc>", text or "", re.I):
+        u = m.group(1).strip()
+        try:
+            path = urllib.parse.urlsplit(u).path or "/"
+        except Exception:
+            continue
+        if not path.startswith("/") or path.lower().endswith(".xml"):
+            continue
+        if path == "/" or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def extract_js_paths(text, limit=150):
+    """从 JS 中提取接口/目录路径字面量（fetch/axios/url 等）。"""
+    out, seen = [], set()
+    for m in _JS_PATH_RE.finditer(text or ""):
+        raw = m.group(1).strip()
+        if raw.startswith("http://") or raw.startswith("https://"):
+            try:
+                raw = urllib.parse.urlsplit(raw).path or ""
+            except Exception:
+                continue
+        if not raw.startswith("/") or raw.startswith("//"):
+            continue
+        path = raw.split("#", 1)[0]
+        if len(path) < 2 or path == "/":
+            continue
+        low = path.lower()
+        if low.endswith(_STATIC_PATH_EXT):
+            continue
+        if "${" in path or "{{" in path or "<" in path:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _extract_meta(body):
     """提取页面 meta 描述/关键词/应用名——SPA 站标题为空时的关键互证文本。"""
     parts = []
@@ -1534,6 +1621,43 @@ def wayback_subdomains(domain, timeout=25):
     except Exception:
         pass
     return subs
+
+
+def wayback_urls(domain, timeout=25, limit=1000):
+    """Wayback CDX 历史 URL 的路径（纯第三方数据，不触碰目标）。
+
+    历史快照里常留有已下线/未公开的目录与接口——
+    目录爆破字典找不到的路径，历史归档里可能有。
+    返回 [(host, path), ...]。
+    """
+    out, seen = [], set()
+    try:
+        url = ("http://web.archive.org/cdx/search/cdx?url=*.%s&output=json"
+               "&fl=original&collapse=urlkey&limit=%d" % (domain, limit))
+        txt = http_get(url, timeout=timeout, retries=1)
+        data = json.loads(txt)
+        for row in (data[1:] if isinstance(data, list) else []):
+            if not row:
+                continue
+            m = re.match(r"[a-zA-Z]+://([^/:?#]+)([^?#]*)", str(row[0]))
+            if not m:
+                continue
+            host = m.group(1).strip(".").lower()
+            path = m.group(2) or ""
+            if not (host == domain or host.endswith("." + domain)):
+                continue
+            if not path.startswith("/") or path in ("/", ""):
+                continue
+            key = (host, path)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+            if len(out) >= 300:
+                break
+    except Exception:
+        pass
+    return out
 
 
 def otx_subdomains(domain, timeout=25):
@@ -2175,6 +2299,7 @@ class Engine(object):
         self.apps = []            # 移动端 APP 资产 [(名称, 开发者, 包名, 归属依据), ...]
         self.packages = []        # APP/小程序包静态分析结果（本地包）
         self.intel = {"aliases": [], "queries": [], "seed_domains": []}
+        self.web_paths = set()    # 路径/接口线索 (host, path, 来源: robots/sitemap/js)
         self.contacts = set()     # 页面/摘要提取的联系邮箱
         self._beian_candidates = set()  # 搜索摘要备案号候选（需自验证才升级）
         self._code_candidates = set()   # 搜索摘要信用代码候选（需自验证才升级）
@@ -3635,6 +3760,103 @@ class Engine(object):
             log("包分析合计: %d 个包，%d 个候选域名待互证（通过才入锚点）"
                 % (len(self.packages), total_cands), "+")
 
+    @staticmethod
+    def _asset_base_url(a):
+        p = int(a.port) if a.port else None
+        scheme = a.scheme or ("https" if p in (443, 8443, 9443)
+                              else "http" if p else "")
+        if not scheme:
+            return ""
+        host = a.host if ":" not in a.host else "[%s]" % a.host
+        suffix = "" if p in (None, 80, 443) else ":%d" % p
+        return "%s://%s%s" % (scheme, host, suffix)
+
+    def _record_paths(self, host, paths, source):
+        n = 0
+        for p in paths or []:
+            key = (host, p, source)
+            if key not in self.web_paths:
+                self.web_paths.add(key)
+                n += 1
+        return n
+
+    def mine_wayback_paths(self, limit_domains=3):
+        """Wayback 历史 URL 路径（被动，第三方数据；纯被动模式也运行）。"""
+        if getattr(self.args, "no_paths", False):
+            return
+        doms = [d for d in sorted(self.anchor["domains"]) if d][:limit_domains]
+        if not doms:
+            return
+        total = 0
+        for d in doms:
+            rows = wayback_urls(d)
+            n = 0
+            for host, path in rows:
+                key = (host, path, "wayback")
+                if key not in self.web_paths:
+                    self.web_paths.add(key)
+                    n += 1
+            total += n
+            if n:
+                log("Wayback 历史路径: %s → %d 条" % (d, n), "+")
+        if total:
+            log("Wayback 路径合计: %d 条（报告「路径/接口线索」）" % total, "+")
+
+    def harvest_paths(self, limit=30, sitemap_limit=3):
+        """robots.txt / sitemap.xml 路径线索采集（只记录，不逐个探测路径）。"""
+        if getattr(self.args, "no_paths", False):
+            return
+        web = [a for a in self.assets.values()
+               if a.host and (a.scheme or a.port is None
+                              or is_web_port(int(a.port)))]
+        web.sort(key=lambda a: {"确认": 0, "疑似": 1, "存疑": 2}.get(a.confidence, 3))
+        web = web[:limit]
+        if not web:
+            return
+        log("路径线索采集: robots.txt / sitemap.xml（%d 个 Web 资产）" % len(web))
+        for a in web:
+            base = self._asset_base_url(a)
+            if not base:
+                continue
+            try:
+                body = http_get(base + "/robots.txt", timeout=8, retries=0,
+                                max_bytes=128 * 1024)
+            except Exception:
+                body = ""
+            low = (body or "")[:4000].lower()
+            if body and ("user-agent" in low or "disallow" in low):
+                n = self._record_paths(a.host, parse_robots(body), "robots")
+                if n:
+                    log("  robots.txt: %s → %d 条路径" % (a.host, n), "+")
+                for m in re.finditer(r"(?im)^\s*sitemap\s*:\s*(\S+)", body):
+                    if sitemap_limit <= 0:
+                        break
+                    sm = m.group(1).strip()
+                    if not sm.lower().startswith("http"):
+                        continue
+                    try:
+                        smb = http_get(sm, timeout=8, retries=0,
+                                       max_bytes=512 * 1024)
+                    except Exception:
+                        continue
+                    sitemap_limit -= 1
+                    sp = parse_sitemap(smb)
+                    n2 = self._record_paths(a.host, sp, "sitemap")
+                    if n2:
+                        log("  sitemap: %s → %d 条路径" % (a.host, n2), "+")
+            # 很多站点不在 robots 里声明 sitemap，直接试一次
+            try:
+                smb = http_get(base + "/sitemap.xml", timeout=8, retries=0,
+                               max_bytes=512 * 1024)
+            except Exception:
+                smb = ""
+            if smb and "<loc>" in smb[:5000].lower():
+                n3 = self._record_paths(a.host, parse_sitemap(smb), "sitemap")
+                if n3:
+                    log("  sitemap.xml: %s → %d 条路径" % (a.host, n3), "+")
+        if self.web_paths:
+            log("路径线索合计: %d 条（报告「路径/接口线索」）" % len(self.web_paths), "+")
+
     def mine_js_secrets(self, total=40, per_limit=512 * 1024):
         """JS 文件挖掘（JSFinder + FindSomething 思路）。
 
@@ -3645,6 +3867,7 @@ class Engine(object):
         if not urls:
             return
         log("JS 挖掘: %d 个脚本" % len(urls))
+        js_paths = 0
         for u in urls:
             try:
                 body = http_get(u, timeout=8, retries=0, max_bytes=per_limit)
@@ -3652,9 +3875,17 @@ class Engine(object):
                 continue
             for m in _DOMAIN_IN_TEXT_RE.finditer(body):
                 self._ref_candidates.append(m.group(1))
+            host = _url_host(u)
+            for p in extract_js_paths(body):
+                key = (host, p, "js")
+                if key not in self.web_paths:
+                    self.web_paths.add(key)
+                    js_paths += 1
             for kind in scan_js_secrets(body):
                 self.js_secrets.append((u[:120], kind))
                 log("  [!] JS 密钥特征: %s → %s" % (u[:80], kind), "!")
+        if js_paths:
+            log("JS 路径/接口线索: %d 条（报告查看）" % js_paths, "+")
         if self.js_secrets:
             log("JS 挖掘完成: %d 处敏感信息（见报告）" % len(self.js_secrets), "!")
 
@@ -3758,6 +3989,7 @@ class Engine(object):
                 "apps": self.apps,
                 "packages": self.packages,
                 "intel": self.intel,
+                "web_paths": [list(t) for t in sorted(self.web_paths)],
                 "ext_tools": sorted(self.ext_used),
                 "ext_detected": sorted(self.ext_detected),
                 "ext_hits": self.ext_hits,
@@ -3936,6 +4168,20 @@ class Engine(object):
                 L.append("| %s | %s |" % (_md(u), _md(kind)))
             L.append("")
             L.append("> 云 AccessKey/私钥泄露可能直接导致云资源失陷——**建议优先人工确认并轮换**。\n")
+
+        # ---- 路径 / 接口线索（robots.txt / sitemap.xml / 前端 JS） ----
+        if self.web_paths:
+            L.append("## 🔎 路径 / 接口线索（%d 条）\n" % len(self.web_paths))
+            L.append("来自目标自行公开的 `robots.txt` / `sitemap.xml` 或前端 JS 硬编码，"
+                     "**不代表路径一定存在漏洞**；可作为人工核查未公开接口、"
+                     "后台目录、文件上传点等暴露面的入口：\n")
+            L.append("| 资产 | 路径 | 来源 |")
+            L.append("|------|------|------|")
+            for host, path, source in sorted(self.web_paths)[:150]:
+                L.append("| %s | `%s` | %s |" % (_md(host), _md(path), _md(source)))
+            L.append("")
+            L.append("> 提示：`robots` 中显式 Disallow 的目录往往是运维最不想被看到的；"
+                     "`js` 来源多为前端调用的 API，可结合未授权访问检查（仅在授权范围内）。\n")
 
         # ---- 外部工具联动结果 ----
         if self.ext_used or self.ext_hits:
@@ -4296,6 +4542,16 @@ class Engine(object):
             parts.append("<table><tr><th>脚本地址</th><th>特征类型</th></tr>")
             for u, kind in self.js_secrets[:30]:
                 parts.append("<tr><td>%s</td><td>%s</td></tr>" % (esc(u), esc(kind)))
+            parts.append("</table>")
+
+        if self.web_paths:
+            parts.append("<h2>🔎 路径 / 接口线索（%d）</h2>" % len(self.web_paths))
+            parts.append("<p class='muted'>来自 robots.txt / sitemap.xml / 前端 JS，"
+                         "不代表存在漏洞；可作为人工核查未公开接口与后台目录的入口。</p>")
+            parts.append("<table><tr><th>资产</th><th>路径</th><th>来源</th></tr>")
+            for host, path, source in sorted(self.web_paths)[:150]:
+                parts.append("<tr><td>%s</td><td><code>%s</code></td><td>%s</td></tr>"
+                             % (esc(host), esc(path), esc(source)))
             parts.append("</table>")
 
         if self.ext_used or self.ext_hits:
@@ -4741,6 +4997,10 @@ def build_parser():
                    help="关闭敏感路径探测（即使 active 模式也不跑）")
     p.add_argument("--sensitive-limit", type=int, default=200,
                    help="敏感路径探测最多覆盖多少个 Web 资产（默认200）")
+    p.add_argument("--no-paths", action="store_true",
+                   help="不做 robots.txt / sitemap.xml 路径线索采集")
+    p.add_argument("--path-limit", type=int, default=30, dest="path_limit",
+                   help="路径线索采集最多覆盖多少个 Web 资产（默认30）")
     p.add_argument("--yes", action="store_true", help="跳过主动扫描的授权确认")
     p.add_argument("--quiet", action="store_true", help="少输出")
 
@@ -4864,6 +5124,9 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         if not args.no_providers:
             eng.collect_providers()
             eng.merge_providers()
+    # Wayback 历史路径（纯第三方数据，不触碰目标；极速模式跳过）
+    if not _stopped() and not fast:
+        eng.mine_wayback_paths()
     # 外部引擎联动（本机装了就调：subfinder / httpx / wafw00f / nuclei）
     if not _stopped() and not getattr(args, "no_ext", False):
         eng.run_external_tools(getattr(args, "ext_tools", None))
@@ -4884,6 +5147,9 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
             sens_limit = int(getattr(args, "sensitive_limit", 200) or 200)
             eng.probe_sensitive(limit=min(sens_limit, 50) if fast else sens_limit)
     if not _stopped():
+        # 路径/接口线索：robots.txt + sitemap.xml（主动 GET，不逐个探测路径）
+        if not args.no_probe and not fast:
+            eng.harvest_paths(limit=int(getattr(args, "path_limit", 30) or 30))
         # APP/小程序包静态分析（本地包，用户提供）→ 候选域名
         eng.analyze_packages(getattr(args, "app_packages", []))
         # JS 文件挖掘（域名 + 密钥特征）→ 页面外链 + 包内候选互证
