@@ -2227,6 +2227,35 @@ class TestIntlEntityExtraction(unittest.TestCase):
         self.assertEqual(len(out), 6)
 
 
+class TestProgressAndToolPaths(unittest.TestCase):
+    def test_progress_hook_clamps(self):
+        got = []
+        orig = cybercensus.PROGRESS_HOOK
+        cybercensus.PROGRESS_HOOK = lambda pct, text="": got.append((pct, text))
+        self.addCleanup(cybercensus.__setattr__, "PROGRESS_HOOK", orig)
+        cybercensus.progress(-5, "a")
+        cybercensus.progress(42, "b")
+        cybercensus.progress(150, "c")
+        self.assertEqual(got, [(0, "a"), (42, "b"), (100, "c")])
+
+    @unittest.skipUnless(os.name == "nt", "Windows 路径查找")
+    def test_ext_path_finds_bundled_tools(self):
+        with tempfile.TemporaryDirectory() as d:
+            tools = os.path.join(d, "tools")
+            os.makedirs(tools)
+            exe = os.path.join(tools, "subfinder.exe")
+            with open(exe, "wb") as f:
+                f.write(b"MZ")
+            orig_which = cybercensus.shutil.which
+            orig_base = cybercensus._base_dir
+            cybercensus.shutil.which = lambda name: None
+            cybercensus._base_dir = lambda: d
+            self.addCleanup(cybercensus.shutil.__setattr__,
+                            "which", orig_which)
+            self.addCleanup(cybercensus.__setattr__, "_base_dir", orig_base)
+            self.assertEqual(cybercensus.ext_path("subfinder"), exe)
+
+
 class TestWikidataParsing(unittest.TestCase):
     def test_search_parse(self):
         data = {"search": [

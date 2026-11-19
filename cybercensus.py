@@ -1128,6 +1128,17 @@ def brute_subdomains(domain, resolver=None, workers=16):
 
 QUIET = False
 LOG_HOOK = None   # GUI 注入的日志回调 hook(msg, level)；设置后日志只走钩子不打印
+PROGRESS_HOOK = None   # GUI 注入的进度回调 hook(pct:int, text:str)
+
+
+def progress(pct, text=""):
+    """上报扫描进度（0-100）供 GUI 画进度条与估算剩余时间。"""
+    if PROGRESS_HOOK is None:
+        return
+    try:
+        PROGRESS_HOOK(max(0, min(100, int(pct))), text or "")
+    except Exception:
+        pass
 
 
 def log(msg, level="*"):
@@ -3894,7 +3905,10 @@ class Engine(object):
                     s.ip = self.sub_map.get(h, "")
 
         # 域名 -> 子域名（8 个免费被动源并行聚合）
-        for d in list(dict.fromkeys(domains)):
+        passive_domains = list(dict.fromkeys(domains))
+        for _i, d in enumerate(passive_domains):
+            progress(27 + int(11 * _i / max(1, len(passive_domains))),
+                     "被动收集：%s" % d)
             log("子域名收集: %s" % d)
             srcs = _gather_subdomain_sources(d, timeout=self.args.timeout)
             ht = {}
@@ -4019,7 +4033,10 @@ class Engine(object):
 
         # IP 反查（输入 IP ∪ 锚点域名 IP——目标自己的 IP 也要做反查/情报）
         all_ips = set(self.input_ips) | set(self.anchor["ips"])
-        for ip in sorted(all_ips):
+        sorted_ips = sorted(all_ips)
+        for _i, ip in enumerate(sorted_ips):
+            progress(38 + int(6 * _i / max(1, len(sorted_ips))),
+                     "IP 归属/反查：%s" % ip)
             log("IP 归属/反查: %s" % ip)
             info = ip_info(ip)
             # Team Cymru：AS 名称可用于"自有 ASN"归属（仅国际目标，省一次 DNS）
@@ -4088,6 +4105,7 @@ class Engine(object):
                     self.ip_notes[ip]["prefixes"].append(pf)
 
         # Whois + RDAP（RDAP 是国外域名的主通道；whois 隐私保护时自动补位）
+        progress(44, "Whois / RDAP 注册人")
         for d in list(self.domains):
             w = parse_whois(whois_query(d))
             org = w.get("org") or ""
@@ -5108,12 +5126,13 @@ class Engine(object):
 
         missing = [n for n in EXT_BINARIES if n not in tools]
         if not tools:
-            log("外部引擎: 未检测到 %s（跳过）。安装后本工具会自动调用。"
+            log("增强引擎: 未检测到 %s（跳过）。放到 exe 同级 tools/ 或安装到 PATH 后会自动调用。"
                 % "/".join(EXT_BINARIES), "!")
             return
         self.ext_detected = set(tools)
         self.ext_used = {}
-        log("== 外部引擎联动（检测到: %s）==" % ", ".join(sorted(tools)), "#")
+        log("== 增强引擎联动（本机已安装的独立程序: %s）=="
+            % ", ".join(sorted(tools)), "#")
         if missing:
             log("未安装（跳过）: %s" % ", ".join(missing))
 
@@ -6187,12 +6206,32 @@ EXT_BINARIES = {
 }
 
 
+def ext_path(name):
+    """查找外部工具：优先 PATH，其次 exe/脚本同级的 tools/、bin/ 目录。
+
+    这样发布时可以把工具放在 CyberCensus.exe 旁边的 tools/ 里，
+    用户无需改 PATH；没有时退回 PATH 查找。
+    """
+    p = shutil.which(name)
+    if p:
+        return p
+    base = _base_dir()
+    dirs = [base, os.path.join(base, "tools"), os.path.join(base, "bin")]
+    exts = ["", ".exe", ".cmd", ".bat", ".ps1"] if os.name == "nt" else [""]
+    for d in dirs:
+        for ext in exts:
+            fp = os.path.join(d, name + ext)
+            if os.path.isfile(fp):
+                return fp
+    return ""
+
+
 def ext_available():
     """探测本机已安装的外部工具：{名称: 可执行路径}。"""
     out = {}
     for name, cands in EXT_BINARIES.items():
         for c in cands:
-            p = shutil.which(c)
+            p = ext_path(c)
             if p:
                 out[name] = p
                 break
@@ -6211,7 +6250,7 @@ def _run_ext(cmd, timeout):
 
 def run_subfinder(domain, timeout=300):
     """subfinder 大字典/多源被动子域（-silent 每行一个主机名）。"""
-    binp = shutil.which("subfinder")
+    binp = ext_path("subfinder")
     if not binp:
         return set()
     try:
@@ -6228,7 +6267,7 @@ def run_subfinder(domain, timeout=300):
 
 def run_httpx(hosts, timeout=600):
     """httpx 批量存活探测（-json 每行一条）。返回 [{url,host,title,tech,server,status}]。"""
-    binp = shutil.which("httpx")
+    binp = ext_path("httpx")
     hosts = [h for h in hosts if h][:300]
     if not binp or not hosts:
         return []
@@ -6275,7 +6314,7 @@ def run_httpx(hosts, timeout=600):
 
 def run_wafw00f(url, timeout=120):
     """wafw00f 精确 WAF 识别（-f json）。返回 WAF 名称或空串。"""
-    binp = shutil.which("wafw00f")
+    binp = ext_path("wafw00f")
     if not binp:
         return ""
     try:
@@ -6292,7 +6331,7 @@ def run_wafw00f(url, timeout=120):
 
 def run_nuclei(urls, timeout=1200, severity="critical,high,medium"):
     """nuclei 模板化 POC 验证（-json 每行一条）。返回 [{template,severity,name,matched}]。"""
-    binp = shutil.which("nuclei")
+    binp = ext_path("nuclei")
     urls = [u for u in urls if u][:15]
     if not binp or not urls:
         return []
@@ -6845,6 +6884,7 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         eng.anchor["orgs"].add(n)
 
     log("输入 -> 名称:%s 域名:%s IP:%s" % (names or "-", sorted(domains) or "-", sorted(ips) or "-"), "#")
+    progress(2, "解析输入")
     if not HAVE_DNS:
         log("未安装 dnspython，DNS 记录将降级为 nslookup（建议 pip install dnspython）", "!")
     if not HAVE_CRYPTO:
@@ -6853,45 +6893,59 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
     # 名称模式没有域名时：先用搜索引擎自举官网域名（无需平台 Key），
     # 再走 crt.sh 组织名反查兜底
     if names and not domains and not ips:
+        progress(4, "名称自举：搜索引擎找官网")
         if not getattr(args, "no_discover", False):
             eng.discover_names_to_domains()
         if not eng.domains:
             log("仅提供名称：官网自举未获域名，退回 crt.sh 按组织名搜索。", "!")
             log("若结果很少，建议手动补充域名输入（ICP备案查询得到的主域名）。", "!")
 
+    progress(10, "建立证据锚点")
     eng.build_anchors(probe=not args.no_probe)
     if not _stopped():
         # 区县级/非常规短名的内容线索（搜索引擎只读，不触碰目标）
         if names and not getattr(args, "no_discover", False) and not fast:
+            progress(18, "关键词内容检索")
             eng.collect_keyword_leads()
+        progress(25, "被动收集（第三方数据源）")
         eng.collect_passive()
         # 搜索引擎风险情报（dork：后台入口 / GitHub 泄露，不触碰目标）
         if not getattr(args, "no_hints", False):
+            progress(45, "搜索引擎风险情报")
             eng.collect_risk_hints()
         # 公众号文章域名挖掘（文档阶段六；需探测验证，纯被动/极速模式跳过）
         if not args.no_probe and not fast:
+            progress(48, "公众号文章域名挖掘")
             eng.mine_weixin_domains()
         # 移动端 APP 发现（App Store 免费 API，第三方查询不触碰目标）
         if not getattr(args, "no_apps", False):
+            progress(51, "移动端 APP 发现")
             eng.discover_apps()
         # 多平台聚合（FOFA / 0.zone / Hunter / DayDayMap）
         if not args.no_providers:
+            progress(54, "测绘平台聚合")
             eng.collect_providers()
             eng.merge_providers()
     # Wayback 历史路径（纯第三方数据，不触碰目标；极速模式跳过）
     if not _stopped() and not fast:
+        progress(58, "Wayback 历史路径")
         eng.mine_wayback_paths()
     # 外部引擎联动（本机装了就调：subfinder / httpx / wafw00f / nuclei）
     if not _stopped() and not getattr(args, "no_ext", False):
+        progress(62, "增强引擎联动")
         eng.run_external_tools(getattr(args, "ext_tools", None))
     if not _stopped():
         if args.active:
+            progress(70, "主动探测/端口扫描")
             eng.scan_active()
+            progress(82, "主动扫描完成")
         elif args.verify and not args.no_probe:
+            progress(78, "疑似资产复核")
             eng.evaluate()          # 先分级，复核只针对疑似/存疑
             eng.verify_suspects(limit=args.verify_limit)
         elif args.probe_found and not args.no_probe:
             log("== 阶段3: 轻量探测（对被动发现的主机做 HTTP 探测）==", "#")
+            progress(78, "轻量 HTTP 探测")
             eng.probe_all_web(include_unported=True,
                               limit=(args.probe_limit or 100))
         # 敏感路径探测：显式 --sensitive 或 active 模式默认开（--no-sensitive 强制关）
@@ -6899,22 +6953,28 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
             getattr(args, "sensitive", False) or args.active)
         if do_sens and not _stopped():
             sens_limit = int(getattr(args, "sensitive_limit", 200) or 200)
+            progress(85, "敏感路径探测")
             eng.probe_sensitive(limit=min(sens_limit, 50) if fast else sens_limit)
     if not _stopped():
         # 路径/接口线索：robots.txt + sitemap.xml（主动 GET，不逐个探测路径）
         if not args.no_probe and not fast:
+            progress(90, "路径/接口线索")
             eng.harvest_paths(limit=int(getattr(args, "path_limit", 30) or 30))
         # APP/小程序包静态分析（本地包，用户提供）→ 候选域名
+        progress(92, "APP/小程序包分析")
         eng.analyze_packages(getattr(args, "app_packages", []))
         # JS 文件挖掘（域名 + 密钥特征）→ 页面外链 + 包内候选互证
         if not fast:
+            progress(94, "JS 文件挖掘")
             eng.mine_js_secrets()
             eng.mine_and_verify_refs(limit=10)
     if _stopped():
         log("已请求停止：对已收集的数据做分级输出。", "!")
     # 先合并"仅主机"占位资产，GUI 不落盘时也能得到去重后的台账
+    progress(96, "证据分级")
     eng._merge_placeholders()
     eng.evaluate()
+    progress(98, "增量对比")
     # 增量监控：与输出目录中的上一轮基线对比（新资产/新端口/新敏感发现告警）
     baseline_diff = eng.diff_baseline()
     eng.save_baseline()
@@ -6930,8 +6990,11 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
             msg += "；新增资产 %d 个" % len(baseline_diff["added"])
         send_webhook(hook, msg)
     if not do_output:
+        progress(100, "完成")
         return eng, {}, "", ""
+    progress(99, "生成报告")
     files, json_path, md_path = eng.output(baseline_diff=baseline_diff)
+    progress(100, "完成")
     return eng, files, json_path, md_path
 
 

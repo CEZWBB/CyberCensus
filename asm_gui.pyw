@@ -24,6 +24,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import traceback
 
 # PyInstaller 单文件模式下 __file__ 指向临时解压目录（_MEIPASS），
@@ -271,6 +272,8 @@ class App(ctk.CTk):
         self._last_md_path = None
         self._last_html_path = None
         self._last_engine = None
+        self._scan_start = 0.0
+        self._eta = None
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -361,7 +364,7 @@ class App(ctk.CTk):
                      ).pack(anchor="w", padx=14, pady=(6, 12))
 
         # ---- 本机外部引擎（状态面板）----
-        self._section(sb, "// 02  ENGINES  ·  本机外部引擎")
+        self._section(sb, "// 02  ENGINES  ·  增强引擎（本机安装）")
         card3 = ctk.CTkFrame(sb, corner_radius=10, fg_color=CARD,
                              border_width=1, border_color=STROKE)
         card3.pack(fill="x", padx=14)
@@ -517,6 +520,10 @@ class App(ctk.CTk):
                                       progress_color=ACCENT, fg_color=CARD)
         self.bar.set(0)
         self.bar.pack(side="left", fill="x", expand=True, padx=(18, 0))
+        self.lbl_progress = ctk.CTkLabel(
+            frm_run, text="0% · 待开始", width=148, anchor="w",
+            font=self.f_mono_sm, text_color=GRAY)
+        self.lbl_progress.pack(side="left", padx=(10, 0))
 
         # ---- 高级参数（独立窗口，不挤占结果区） ----
         self.btn_adv = ctk.CTkButton(
@@ -692,7 +699,7 @@ class App(ctk.CTk):
                       ).grid(row=3, column=0, columnspan=3, sticky="w", padx=(14, 0), pady=2)
 
         self.var_ext = ctk.BooleanVar(value=True)
-        ctk.CTkSwitch(f, text="调用本机外部工具(subfinder/httpx/wafw00f/nuclei)",
+        ctk.CTkSwitch(f, text="调用增强引擎(subfinder/httpx/wafw00f/nuclei，本机安装)",
                       variable=self.var_ext, progress_color=ACCENT
                       ).grid(row=3, column=3, columnspan=3, sticky="w", padx=(14, 0), pady=2)
 
@@ -1028,9 +1035,14 @@ class App(ctk.CTk):
         if not platforms:
             self._append_log("未选择任何平台（或未配 Key）：只跑本地被动采集。", "!")
         self._append_log("目标已提交，开始测绘…", "#")
-        self.bar.start()
+        self.bar.set(0)
+        self._scan_start = time.time()
+        self._eta = None
+        self.lbl_progress.configure(text="0% · 估算中…", text_color=ACCENT)
 
         cybercensus.LOG_HOOK = lambda msg, level: self._queue.put(("log", msg, level))
+        cybercensus.PROGRESS_HOOK = (
+            lambda pct, text="": self._queue.put(("progress", pct, text)))
         self._worker = threading.Thread(target=self._run,
                                         args=(args, names, domains, ips),
                                         daemon=True)
@@ -1069,6 +1081,8 @@ class App(ctk.CTk):
                 item = self._queue.get_nowait()
                 if item[0] == "log":
                     self._append_log(item[1], item[2])
+                elif item[0] == "progress":
+                    self._on_progress(item[1], item[2])
                 elif item[0] == "done":
                     self._on_done(*item[1])
                 elif item[0] == "report_done":
@@ -1079,9 +1093,41 @@ class App(ctk.CTk):
             pass
         self.after(100, self._poll)
 
+    @staticmethod
+    def _fmt_dur(sec):
+        sec = max(0, int(sec))
+        if sec < 60:
+            return "%d 秒" % sec
+        if sec < 3600:
+            return "%d 分 %02d 秒" % (sec // 60, sec % 60)
+        return "%d 时 %02d 分" % (sec // 3600, (sec % 3600) // 60)
+
+    def _on_progress(self, pct, text=""):
+        try:
+            pct = max(0, min(100, int(pct)))
+        except Exception:
+            return
+        self.bar.set(pct / 100.0)
+        elapsed = max(0.1, time.time() - (self._scan_start or time.time()))
+        if 0 < pct < 100:
+            eta = elapsed * (100 - pct) / pct
+            # 指数平滑：避免某一阶段突然变快/变慢导致剩余时间来回跳
+            self._eta = eta if self._eta is None else self._eta * 0.65 + eta * 0.35
+            self.lbl_progress.configure(
+                text="%d%% · 剩余约 %s" % (pct, self._fmt_dur(self._eta)),
+                text_color=ACCENT)
+        elif pct >= 100:
+            self.lbl_progress.configure(
+                text="100%% · 用时 %s" % self._fmt_dur(elapsed),
+                text_color=GREEN)
+
     def _on_done(self, eng):
         self._set_running(False)
         self.bar.set(1)
+        if self._scan_start:
+            self.lbl_progress.configure(
+                text="100%% · 用时 %s" % self._fmt_dur(time.time() - self._scan_start),
+                text_color=GREEN)
         self._last_engine = eng
         counts = {"确认": 0, "疑似": 0, "存疑": 0}
         for a in eng.assets.values():
@@ -1121,6 +1167,7 @@ class App(ctk.CTk):
     def _on_error(self, tb_text):
         self._set_running(False)
         self.bar.set(0)
+        self.lbl_progress.configure(text="0% · 出错", text_color=RED)
         self._set_status("● 出错", RED)
         for card in (self.card_confirmed, self.card_suspect, self.card_rejected):
             card.configure(text="0")
