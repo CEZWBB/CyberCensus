@@ -1611,6 +1611,16 @@ class TestRegionAliasQuery(unittest.TestCase):
         self.assertEqual(f("四川大学华西医院"), "四川大学华西医院")
 
 
+class TestOperatorCandidates(unittest.TestCase):
+    def test_province_operator_domains(self):
+        out = cybercensus._operator_candidates("中国移动通信集团四川有限公司")
+        self.assertIn("wap.sc.10086.cn", out)
+        self.assertNotIn("10086.cn", out)
+        self.assertEqual(cybercensus._operator_candidates("东莞市人民医院"), [])
+        self.assertEqual(cybercensus._operator_candidates("四川移动"),
+                         ["wap.sc.10086.cn"])
+
+
 class TestGovCandidateGuard(unittest.TestCase):
     def test_skip_gov_for_telecom(self):
         f = cybercensus._gov_candidate_allowed
@@ -1677,7 +1687,7 @@ class TestPassiveRegionCandidates(unittest.TestCase):
         self.addCleanup(cybercensus.__setattr__,
                         "discover_domains_from_search", orig_disc)
         e.discover_names_to_domains()
-        self.assertIn("四川移动", calls)              # 触发了简称补搜
+        self.assertTrue(any("四川移动" in c for c in calls))   # 触发了简称补搜
         self.assertIn("sc.10086.cn", e.domains)
         self.assertNotIn("10086.cn", e.domains)
 

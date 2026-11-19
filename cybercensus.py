@@ -263,6 +263,43 @@ _ORG_BOILERPLATE = (
 )
 # 运营商/金融等行业的第一步就是地域+行业简称（四川移动、四川银行）
 _REGION_ALIAS_KEYS = ("移动", "联通", "电信", "铁塔", "广电", "银行")
+_OPERATOR_KEYS = ("移动", "联通", "电信", "铁塔", "广电")
+
+# 运营商集团官网根域（确定性候选，不依赖搜索引擎返回）
+# 四川移动 → 四川缩写 sc + 10086.cn → sc.10086.cn，再走正常验证
+OPERATOR_ROOTS = {
+    "移动": ("10086.cn",),
+    "联通": ("10010.com",),
+    "电信": ("189.cn",),
+    "铁塔": ("chinatowercom.cn",),
+    "广电": ("10099.com.cn",),
+}
+OPERATOR_ROOT_DOMAINS = frozenset(
+    r for roots in OPERATOR_ROOTS.values() for r in roots)
+
+
+def _operator_candidates(name):
+    """按"省份缩写 + 运营商根域"生成省级候选（四川移动 → sc.10086.cn）。
+
+    搜索引擎被限流/降级时会完全漏掉运营商省级站点；这几个根域是公开
+    已知的集团官网域名，生成后仍要经过标题/证书互证，不直接当锚点。
+    """
+    prov_codes = []
+    for prov, codes in PROVINCE_CODES.items():
+        if prov in name:
+            prov_codes = [c for c in codes if len(c) == 2]
+            break
+    if not prov_codes:
+        return []
+    out = []
+    for kw, roots in OPERATOR_ROOTS.items():
+        if kw in name:
+            for root in roots:
+                for pc in prov_codes:
+                    # 省级运营商门户实际可访问的通常是 wap.<省>.<根域>
+                    # （wap.sc.10086.cn）；验证后会自动补上父域 sc.10086.cn
+                    out.append("wap.%s.%s" % (pc, root))
+    return out
 
 
 def _region_alias_query(name):
@@ -2003,6 +2040,29 @@ class Engine(object):
                 self._absorb_search_text(lookup[0])
                 cands = discover_domains_from_search(name, max_candidates=5,
                                                      lookup=lookup)
+                # 运营商：补一次"网上营业厅"查询，避免 Bing 只回政务门户导致
+                # 候选里没有 10086.cn 体系（四川移动 → wap.sc.10086.cn）
+                if any(k in name for k in _OPERATOR_KEYS):
+                    alias_q = _region_alias_query(name) or name
+                    lk2 = search_engine_lookup(alias_q + " 网上营业厅")
+                    self._absorb_search_text(lk2[0])
+                    extra = discover_domains_from_search(
+                        alias_q, max_candidates=10, lookup=lk2)
+                    seen_c = {d for d, _ in cands}
+                    new = [(d, s) for d, s in extra if d not in seen_c]
+                    if new:
+                        cands += new
+                        log("运营商补充搜索（%s 网上营业厅）: %s"
+                            % (alias_q, ", ".join(d for d, _ in new)), "+")
+                # 运营商：域名知识库直接补省级候选（不依赖搜索引擎）
+                fixed = _operator_candidates(name)
+                if fixed:
+                    have = {d for d, _ in cands}
+                    add = [(d, 20) for d in fixed if d not in have]
+                    if add:
+                        cands = add + cands
+                        log("运营商省级候选（域名知识库）: %s"
+                            % ", ".join(d for d, _ in add), "+")
                 # 名称含省份时优先带省份缩写/全拼标签的候选：
                 # "四川移动" 命中 wap.sc.10086.cn / dcp.sc.10086.cn，
                 # 而不是只拿全国共用的 www.10086.cn
@@ -2053,7 +2113,9 @@ class Engine(object):
                     weak_hosts = [dom]
                     depth = dom.count(".") - root.count(".")
                     if depth <= 1:
-                        weak_hosts.append(root)
+                        # 运营商集团根域（10086.cn）全国共用，不能整体当锚点
+                        if root not in OPERATOR_ROOT_DOMAINS:
+                            weak_hosts.append(root)
                     else:
                         parent = dom.split(".", 1)[1]
                         if parent and parent != root:
@@ -2078,7 +2140,12 @@ class Engine(object):
                 lookups.append(search_engine_lookup(name + " 官网"))
             lookups.append(search_engine_lookup(name + " ICP备案"))
             alias = _region_alias_query(name)
-            if alias and alias != name:
+            alias_q = alias if (alias and alias != name) else name
+            if any(k in name for k in _OPERATOR_KEYS):
+                # "网上营业厅"是运营商省级站点最稳定的入口关键词：
+                # 四川移动 → wap.sc.10086.cn / login.10086.cn
+                lookups.append(search_engine_lookup(alias_q + " 网上营业厅"))
+            elif alias and alias != name:
                 lookups.append(search_engine_lookup(alias))
             text = " ".join(t for t, _ in lookups)
             hosts = [h for _, hs in lookups for h in hs]
@@ -2089,6 +2156,14 @@ class Engine(object):
                     "若结果不全，请改用全称重试（如\"中国移动通信集团四川有限公司\"）。" % name, "!")
             cands = discover_domains_from_search(name, max_candidates=12,
                                                  lookup=lookup)
+            fixed = _operator_candidates(name)
+            if fixed:
+                have = {d for d, _ in cands}
+                add = [(d, 20) for d in fixed if d not in have]
+                if add:
+                    cands = add + cands
+                    log("运营商省级候选（域名知识库）: %s"
+                        % ", ".join(d for d, _ in add), "+")
             if not cands:
                 log("搜索引擎未找到 %s 的候选域名；建议手动补充域名输入。" % name, "!")
                 continue
@@ -2097,10 +2172,14 @@ class Engine(object):
             if region:
                 log("省级候选优先验证: %s" % ", ".join(region), "+")
             verified = []
-            for dom, score in cands[:8]:
+            attempts = 0
+            for dom, score in cands:
                 if not _gov_candidate_allowed(name, dom):
                     log("  跳过非政务目标的政府门户候选: %s" % dom)
                     continue
+                if attempts >= 8:
+                    break
+                attempts += 1
                 if self._verify_candidate_domain(name, dom):
                     verified.append(dom)
             if verified:
@@ -2160,7 +2239,10 @@ class Engine(object):
             return
         depth = dom.count(".") - root.count(".")
         if depth <= 1:
-            self.domains.add(root)
+            # 集团根域（10086.cn）全国共用：验证通过省级域 sc.10086.cn 时
+            # 只保留省级域，不把全国根域拉进锚点
+            if root not in OPERATOR_ROOT_DOMAINS:
+                self.domains.add(root)
         else:
             parent = dom.split(".", 1)[1]   # 去掉最左标签：wap.sc.10086.cn → sc.10086.cn
             if parent and parent != root:
@@ -2928,7 +3010,8 @@ class Engine(object):
         """
         with_ports = {}
         for a in self.assets.values():
-            if a.port and a.host:
+            # 锚点资产可能只有 scheme（https + 端口默认 443），也算可合并目标
+            if a.host and (a.port or a.scheme):
                 with_ports.setdefault((a.host or "").lower(), []).append(a)
         for k in list(self.assets.keys()):
             ph = self.assets[k]
@@ -4491,6 +4574,8 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         eng.mine_and_verify_refs(limit=10)
     if _stopped():
         log("已请求停止：对已收集的数据做分级输出。", "!")
+    # 先合并"仅主机"占位资产，GUI 不落盘时也能得到去重后的台账
+    eng._merge_placeholders()
     eng.evaluate()
     # 增量监控：与输出目录中的上一轮基线对比（新资产/新端口/新敏感发现告警）
     baseline_diff = eng.diff_baseline()
