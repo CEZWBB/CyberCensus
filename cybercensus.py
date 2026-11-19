@@ -215,6 +215,44 @@ def extract_credit_code(text):
     return ""
 
 
+def extract_credit_codes(text, limit=5):
+    """提取文本里所有通过 GB32100 校验的信用代码。"""
+    out = []
+    for m in CREDIT_CODE_RE.finditer(str(text or "").upper()):
+        c = m.group(1)
+        if _credit_code_ok(c) and c not in out:
+            out.append(c)
+        if len(out) >= limit:
+            break
+    return out
+
+
+LEGAL_SUFFIX_RE = re.compile(r"(?:股份有限公司|有限责任公司|有限公司|分公司)")
+
+
+def extract_legal_entities(text, brands=(), limit=6):
+    """从搜索摘要/工商页提取法人主体名（含分公司）。
+
+    以"有限公司/分公司"后缀为锚点向前取名称，能同时拿到
+    "中国移动通信集团四川有限公司"和"…有限公司双流分公司"两个层级；
+    只保留含指定行业品牌（移动/电信/医院…）的实体。
+    """
+    out, text = [], text or ""
+    for m in LEGAL_SUFFIX_RE.finditer(text):
+        seg = text[max(0, m.end() - 60):m.end()]
+        seg = re.split(r"[^一-龥A-Za-z0-9]", seg)[-1]
+        seg = re.split(r"[与和及]", seg)[-1].strip()
+        if not (6 <= len(seg) <= 60):
+            continue
+        if brands and not any(b in seg for b in brands):
+            continue
+        if seg not in out:
+            out.append(seg)
+        if len(out) >= limit:
+            break
+    return out
+
+
 # whois 隐私保护占位组织名：不是真实注册主体，不能进证据锚点
 PRIVACY_ORG_MARKERS = (
     "REDACTED FOR PRIVACY", "WhoisGuard", "Registration Private",
@@ -3878,13 +3916,14 @@ class Engine(object):
 
     # ---- 4.7 搜索引擎风险情报（dork，不触碰目标） ----
     def collect_keyword_leads(self, max_queries=8):
-        """Bing + 360 内容检索（无平台 Key 时模拟 FOFA title/body 搜索）。
+        """多引擎内容检索 + 主体反推（无平台 Key 时最接近 FOFA 的路径）。
 
-        专门解决"双流移动 / 双流电信"这类区县短名：
-        · 360 对 `site:10086.cn 四川移动` 能返回 www.sc.10086.cn 等真实页面；
-        · 单独一条结果不算数，**同一运营商根域+省缩写至少 2 次命中**才作为
-          弱锚点（只进疑似）——避免把 tj/zj/fj 等无关省份卷进来；
-        · 命中 URL 全部列入报告「风险线索」，页面路径进「路径/接口线索」。
+        · Bing/360/百度/搜狗 查询，验证码/限流自动跳过；
+        · 从结果摘要提取**法人主体名**（双流移动 → 中国移动通信集团四川
+          有限公司双流分公司）和**统一社会信用代码**，再反推省份/候选域，
+          不再假设"一定挂在 sc.10086.cn"；
+        · 同一运营商根域+省缩写≥2 次命中才立省级弱锚点（只进疑似）；
+        · 命中 URL 进「风险线索」，路径进「路径/接口线索」。
         """
         names = [n for n in self.names if n][:4]
         if not names:
@@ -3905,6 +3944,8 @@ class Engine(object):
         allowed_provs = set()
         for n in names:
             allowed_provs |= set(_province_codes(n))
+        allowed_prov_names = {p for p, cs in PROVINCE_CODES.items()
+                              if any(c in allowed_provs for c in cs)}
         places = []
         for n in names:
             _prov, city, _brand = _decode_region_brand(n)
@@ -3912,6 +3953,10 @@ class Engine(object):
             for py in _pinyin_variants(place):
                 if py and py not in places:
                     places.append(py)
+        lead_place = ""
+        for n in names:
+            _p, city, _b = _decode_region_brand(n)
+            lead_place = city or _extract_place(n) or lead_place
 
         queries = []
         for n in names:
@@ -3929,50 +3974,145 @@ class Engine(object):
             % len(queries))
         hits, added = 0, 0
         votes = {}
-        for q in queries:
-            urls = search_multi_urls(q)
-            for u in urls:
-                host = _url_host(u)
-                if not host:
-                    continue
-                key = ("搜索命中｜%s" % q, u)
-                if key not in self.risk_hints:
-                    self.risk_hints.append(key)
-                    hits += 1
-                try:
-                    path = urllib.parse.urlsplit(u).path or ""
-                except Exception:
-                    path = ""
-                if path and path != "/":
-                    self.web_paths.add((host, path, "search"))
-                under = any(host == d or host.endswith("." + d)
-                            for d in self.anchor["domains"])
-                if under:
-                    self.add_asset(host, None, None, source="search:kw")
+
+        def _handle(q, u):
+            nonlocal hits, added
+            host = _url_host(u)
+            if not host:
+                return
+            key = ("搜索命中｜%s" % q, u)
+            if key not in self.risk_hints and len(self.risk_hints) < 200:
+                self.risk_hints.append(key)
+                hits += 1
+            try:
+                path = urllib.parse.urlsplit(u).path or ""
+            except Exception:
+                path = ""
+            if path and path != "/":
+                self.web_paths.add((host, path, "search"))
+            under = any(host == d or host.endswith("." + d)
+                        for d in self.anchor["domains"])
+            if under:
+                self.add_asset(host, None, None, source="search:kw")
+                added += 1
+                return
+            root = root_domain(host)
+            if root not in OPERATOR_ROOT_DOMAINS:
+                return
+            labels = host.split(".")
+            segs = labels + [p.lower() for p in path.split("/") if p]
+            prov_hits = [c for c in segs if c in prov_map]
+            low = (host + path).lower()
+            place_hit = (any(pl in labels for pl in places if pl)
+                         or any(len(pl) >= 4 and pl in low
+                                for pl in places if pl))
+            if place_hit and not host.startswith(("www.", "m.")):
+                if host not in self.anchor["domains"]:
+                    self.domains.add(host)
+                    self.anchor["domains"].add(host)
+                    self.anchor["weak_domains"].add(host)
+                    log("  搜索命中区县运营商域（弱锚点）: %s" % host, "+")
                     added += 1
+                return
+            for pc in prov_hits:
+                if allowed_provs and pc not in allowed_provs:
                     continue
-                root = root_domain(host)
-                if root not in OPERATOR_ROOT_DOMAINS:
-                    continue
-                labels = host.split(".")
-                segs = labels + [p.lower() for p in path.split("/") if p]
-                prov_hits = [c for c in segs if c in prov_map]
-                low = (host + path).lower()
-                place_hit = (any(pl in labels for pl in places if pl)
-                             or any(len(pl) >= 4 and pl in low
-                                    for pl in places if pl))
-                if place_hit and not host.startswith(("www.", "m.")):
-                    if host not in self.anchor["domains"]:
-                        self.domains.add(host)
-                        self.anchor["domains"].add(host)
-                        self.anchor["weak_domains"].add(host)
-                        log("  搜索命中区县运营商域（弱锚点）: %s" % host, "+")
-                        added += 1
-                    continue
-                for pc in prov_hits:
-                    if allowed_provs and pc not in allowed_provs:
+                votes[(root, pc)] = votes.get((root, pc), 0) + 1
+
+        for q in queries:
+            for u in search_multi_urls(q):
+                _handle(q, u)
+
+        # ---- 从搜索结果摘要识别法人主体 / 信用代码，再反推候选 ----
+        entities, codes = [], []
+        weak_entities = set()
+
+        def _ingest(text, allow_parent=False):
+            for e in extract_legal_entities(text, brands or _OPERATOR_KEYS):
+                if allowed_prov_names:
+                    if not any(p in e for p in allowed_prov_names):
                         continue
-                    votes[(root, pc)] = votes.get((root, pc), 0) + 1
+                elif lead_place and lead_place not in e:
+                    if not allow_parent:
+                        continue
+                    # 母公司名通常不含区县：要求其省份与检索共识一致，
+                    # 避免把搜索结果里其他省份的移动公司卷进来
+                    prov_name = next((p for p in PROVINCE_CODES
+                                      if p in e), "")
+                    pcodes = [c for c in PROVINCE_CODES.get(prov_name, ())
+                              if len(c) == 2]
+                    if not any((r, pc) in votes for r in OPERATOR_ROOT_DOMAINS
+                               for pc in pcodes):
+                        # 搜索被降级、没有省域共识时，最多接受 1 个母公司线索，
+                        # 且只作为弱锚点，不做强验证
+                        if votes or entities or weak_entities:
+                            continue
+                        weak_entities.add(e)
+                if e not in entities:
+                    entities.append(e)
+            for c in extract_credit_codes(text):
+                if c not in codes:
+                    codes.append(c)
+
+        for n in names:
+            texts = []
+            try:
+                texts.append(search_engine_lookup(n)[0])
+            except Exception:
+                pass
+            try:
+                texts.append(search_360_lookup(n)[0])
+            except Exception:
+                pass
+            _ingest(" ".join(t for t in texts if t))
+        if not entities:
+            # 基础查询被降级（只回政务/新闻）时，用"<短名> 有限公司"再试一次：
+            # 实测能带回 企查查/水滴 的法人主体名（中国移动…四川有限公司）
+            for n in names[:2]:
+                try:
+                    _ingest(search_360_lookup(n + " 有限公司")[0],
+                            allow_parent=True)
+                except Exception:
+                    pass
+        for e in entities[:4]:
+            self.anchor["orgs"].add(e)
+            log("搜索识别到关联主体: %s" % e, "+")
+            cands_e = list(dict.fromkeys(
+                _operator_candidates(e) + _gov_candidates(e)))[:2]
+            for d in cands_e:
+                if not d or d in self.domains:
+                    continue
+                # 标准/主动模式：直接验证关联主体推导出的候选（如 wap.sc.10086.cn）
+                if (not getattr(self.args, "no_probe", True)
+                        and e not in weak_entities):
+                    try:
+                        before = set(self.domains)
+                        if self._verify_candidate_domain(e, d):
+                            # build_anchors 已经跑过：把新验证域同步进锚点，
+                            # 否则后续子域拿不到 A 级归属证据
+                            for x in (self.domains - before):
+                                self.anchor["domains"].add(x)
+                            log("  关联主体候选验证通过: %s" % d, "+")
+                            added += 1
+                            continue
+                    except Exception:
+                        pass
+                self.domains.add(d)
+                self.anchor["domains"].add(d)
+                self.anchor["weak_domains"].add(d)
+                self.add_asset(d, None, None, source="search:entity")
+                log("  关联主体推导出候选（弱锚点）: %s" % d, "+")
+                added += 1
+        for c in codes[:3]:
+            if c not in self.anchor["credit_codes"]:
+                self._code_candidates.add(c)
+                log("搜索识别到信用代码: %s（待自验证）" % c, "+")
+        # 用法人主体全称/信用代码再搜一轮
+        extra_q = [e + " 官网" for e in entities[:2]] + codes[:1]
+        for q in extra_q:
+            for u in search_multi_urls(q):
+                _handle(q, u)
+
         # 多结果共识：同根域+省缩写至少 2 次命中 → 省级弱锚点（只进疑似）
         for (root, pc), cnt in sorted(votes.items(), key=lambda kv: -kv[1]):
             if cnt < 2:

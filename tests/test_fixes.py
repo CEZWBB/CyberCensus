@@ -1764,8 +1764,14 @@ class TestKeywordSearch(unittest.TestCase):
                     "https://www.10086.cn/x",
                     "https://news.example.com/a"]
         orig_multi = cybercensus.search_multi_urls
+        orig_lookup = cybercensus.search_360_lookup
         cybercensus.search_multi_urls = lambda q, timeout=15: fake(q)
+        orig_bing = cybercensus.search_engine_lookup
+        cybercensus.search_360_lookup = lambda q, timeout=15: ("", [])
+        cybercensus.search_engine_lookup = lambda q, timeout=15: ("", [])
         self.addCleanup(cybercensus.__setattr__, "search_multi_urls", orig_multi)
+        self.addCleanup(cybercensus.__setattr__, "search_360_lookup", orig_lookup)
+        self.addCleanup(cybercensus.__setattr__, "search_engine_lookup", orig_bing)
         e.collect_keyword_leads()
         # 省级运营商域成为弱锚点（只进疑似）；www 根域不整体纳入
         self.assertIn("sc.10086.cn", e.anchor["weak_domains"])
@@ -1780,13 +1786,48 @@ class TestKeywordSearch(unittest.TestCase):
             beian="", threads=10, timeout=5))
         e.names = ["双流电信"]
         orig_multi = cybercensus.search_multi_urls
+        orig_lookup = cybercensus.search_360_lookup
         cybercensus.search_multi_urls = lambda q, timeout=15: [
             "https://sc.189.cn/a", "https://sc.189.cn/b",
             "https://cloudmeeting.189.cn/x"]
+        orig_bing = cybercensus.search_engine_lookup
+        cybercensus.search_360_lookup = lambda q, timeout=15: ("", [])
+        cybercensus.search_engine_lookup = lambda q, timeout=15: ("", [])
         self.addCleanup(cybercensus.__setattr__, "search_multi_urls", orig_multi)
+        self.addCleanup(cybercensus.__setattr__, "search_360_lookup", orig_lookup)
+        self.addCleanup(cybercensus.__setattr__, "search_engine_lookup", orig_bing)
         e.collect_keyword_leads()
         self.assertIn("sc.189.cn", e.anchor["weak_domains"])
         self.assertNotIn("189.cn", e.anchor["domains"])
+
+    def test_entity_and_credit_code_pivot(self):
+        """双流移动：从搜索摘要里的法人主体/信用代码反推候选域。"""
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.names = ["双流移动"]
+        orig_multi = cybercensus.search_multi_urls
+        orig_lookup = cybercensus.search_360_lookup
+        orig_bing = cybercensus.search_engine_lookup
+        cybercensus.search_multi_urls = lambda q, timeout=15: []
+        cybercensus.search_360_lookup = lambda q, timeout=15: (
+            "中国移动通信集团四川有限公司双流分公司 "
+            "统一社会信用代码：91110000100003962Y", [])
+        cybercensus.search_engine_lookup = lambda q, timeout=15: ("", [])
+        self.addCleanup(cybercensus.__setattr__, "search_multi_urls", orig_multi)
+        self.addCleanup(cybercensus.__setattr__, "search_360_lookup", orig_lookup)
+        self.addCleanup(cybercensus.__setattr__, "search_engine_lookup", orig_bing)
+        e.collect_keyword_leads()
+        self.assertIn("中国移动通信集团四川有限公司双流分公司",
+                      e.anchor["orgs"])
+        self.assertIn("wap.sc.10086.cn", e.anchor["weak_domains"])
+        self.assertIn("91110000100003962Y", e._code_candidates)
+
+    def test_extract_legal_entities(self):
+        text = ("中国移动通信集团四川有限公司双流分公司 与 "
+                "中国电信股份有限公司四川分公司 均在此")
+        out = cybercensus.extract_legal_entities(text, ("移动", "电信"))
+        self.assertIn("中国移动通信集团四川有限公司双流分公司", out)
+        self.assertIn("中国电信股份有限公司四川分公司", out)
 
     def test_360_urls_parser(self):
         orig = cybercensus.http_get
