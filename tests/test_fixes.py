@@ -2173,5 +2173,238 @@ class TestPackageAnalysis(unittest.TestCase):
         self.assertEqual(e.packages, [])
 
 
+class TestIntlOrgMatching(unittest.TestCase):
+    def test_legal_suffix_variants(self):
+        self.assertTrue(cybercensus._org_match("Acme Corporation", "ACME CORP"))
+        self.assertTrue(cybercensus._org_match("Foo GmbH", "Foo"))
+        self.assertTrue(cybercensus._org_match("Bar Pty Ltd", "Bar Pty. Ltd."))
+
+    def test_diacritics_folded(self):
+        self.assertTrue(cybercensus._org_match("Societe Generale",
+                                               "Société Générale"))
+
+    def test_acronym(self):
+        self.assertTrue(cybercensus._org_match(
+            "IBM", "International Business Machines Corporation"))
+
+    def test_different_companies_no_match(self):
+        self.assertFalse(cybercensus._org_match("Acme Group", "Acme Holdings"))
+        self.assertFalse(cybercensus._org_match("Acme Corporation", "Acme Systems"))
+        self.assertFalse(cybercensus._org_match("Global Bank", "Global Telecom"))
+        # 同一品牌、仅法律后缀不同 → 视为同一主体（Acme Corporation / Acme Ltd）
+        self.assertTrue(cybercensus._org_match("Acme Corporation", "Acme Ltd"))
+
+    def test_short_ascii_subject(self):
+        self.assertTrue(cybercensus._is_ascii_name("Acme Corporation"))
+        self.assertTrue(cybercensus._is_ascii_name("Société Générale"))
+        self.assertFalse(cybercensus._is_ascii_name("中国移动"))
+        self.assertFalse(cybercensus._is_ascii_name(""))
+
+
+class TestIntlEntityExtraction(unittest.TestCase):
+    def test_extract_suffix_anchored(self):
+        text = ("Acme Corporation is a global company. "
+                "Contact Foo GmbH for details. The Acme Corporation, a leader.")
+        out = cybercensus.extract_legal_entities_intl(text)
+        self.assertIn("Acme Corporation", out)
+        self.assertIn("Foo GmbH", out)
+
+    def test_strips_page_leading_words(self):
+        out = cybercensus.extract_legal_entities_intl(
+            "Welcome to Acme Corporation today")
+        self.assertIn("Acme Corporation", out)
+        self.assertNotIn("Welcome to Acme Corporation", out)
+
+    def test_related_filter(self):
+        self.assertTrue(cybercensus._intl_entity_related(
+            "Acme Corporation", "Acme"))
+        self.assertFalse(cybercensus._intl_entity_related(
+            "Globex Corporation", "Acme"))
+
+    def test_domain_candidates(self):
+        out = cybercensus._intl_domain_candidates("Acme Corporation", limit=6)
+        self.assertIn("acme.com", out)
+        self.assertEqual(len(out), 6)
+
+
+class TestWikidataParsing(unittest.TestCase):
+    def test_search_parse(self):
+        data = {"search": [
+            {"id": "Q9531", "label": "BBC",
+             "description": "British public service broadcaster"},
+        ]}
+        self.assertEqual(cybercensus.parse_wikidata_search(data),
+                         [("Q9531", "BBC", "British public service broadcaster")])
+
+    def test_official_site_parse(self):
+        data = {"entities": {"Q9531": {"claims": {"P856": [{
+            "mainsnak": {"datavalue": {"value": "https://www.bbc.co.uk/"}}
+        }]}}}}
+        self.assertEqual(
+            cybercensus.parse_wikidata_official_sites(data, "Q9531"),
+            ["www.bbc.co.uk"])
+
+
+class TestRegistryIds(unittest.TestCase):
+    def test_lei_checksum(self):
+        self.assertTrue(cybercensus._lei_ok("529900T8BM49AURSDO55"))
+        self.assertTrue(cybercensus._lei_ok("5493001KJTIIGC8Y1R12"))
+        self.assertFalse(cybercensus._lei_ok("529900T8BM49AURSDO56"))
+        self.assertFalse(cybercensus._lei_ok("123"))
+
+    def test_extract_ids(self):
+        out = cybercensus.extract_registry_ids(
+            "LEI 529900T8BM49AURSDO55 VAT: DE123456789 "
+            "Company No. 01234567 DUNS 123456789")
+        self.assertIn("lei:529900T8BM49AURSDO55", out)
+        self.assertIn("vat:DE123456789", out)
+        self.assertIn("crn:01234567", out)
+        self.assertIn("duns:123456789", out)
+
+
+class TestRdapAndAsnParsing(unittest.TestCase):
+    def _rdap(self):
+        return {
+            "entities": [{
+                "roles": ["registrant"],
+                "vcardArray": ["vcard", [
+                    ["version", {}, "text", "4.0"],
+                    ["fn", {}, "text", "Acme Inc"],
+                    ["org", {}, "text", "Acme Inc"],
+                    ["email", {}, "text", "admin@acme.example"],
+                    ["adr", {}, "text", ["", "", "", "", "", "", "US"]],
+                ]],
+                "entities": [{
+                    "roles": ["registrar"],
+                    "vcardArray": ["vcard", [
+                        ["fn", {}, "text", "Example Registrar"],
+                        ["org", {}, "text", "Example Registrar Inc"],
+                    ]],
+                }],
+            }],
+            "events": [{"eventAction": "registration",
+                        "eventDate": "2010-01-02T03:04:05Z"}],
+        }
+
+    def test_parse_rdap(self):
+        out = cybercensus.parse_rdap(self._rdap())
+        self.assertIn("Acme Inc", out["orgs"])
+        self.assertIn("admin@acme.example", out["emails"])
+        self.assertEqual(out["country"], "US")
+        self.assertEqual(out["registrar"], "Example Registrar")
+        self.assertEqual(out["created"], "2010-01-02T03:04:05")
+
+    def test_privacy_marker_filtered(self):
+        data = {"entities": [{
+            "roles": ["registrant"],
+            "vcardArray": ["vcard", [
+                ["org", {}, "text", "REDACTED FOR PRIVACY"],
+                ["fn", {}, "text", "REDACTED FOR PRIVACY"],
+            ]],
+        }]}
+        self.assertEqual(cybercensus.parse_rdap(data)["orgs"], [])
+
+    def test_parse_asn(self):
+        out = cybercensus.parse_asn_txt(
+            "15169 | 8.8.8.0/24 | US | arin | 1992-12-01")
+        self.assertEqual(out["asn"], "AS15169")
+        self.assertEqual(out["prefix"], "8.8.8.0/24")
+        self.assertEqual(out["country"], "US")
+
+
+class TestIntlPageEvidence(unittest.TestCase):
+    def test_tracking_ids(self):
+        body = ('<script>gtag("config","G-ABC123XYZ");</script>'
+                '<script>GTM-AB12CD3</script>'
+                "<script>fbq('init','123456789012345');</script>")
+        out = cybercensus.extract_tracking_ids(body)
+        self.assertIn("ga4:G-ABC123XYZ", out)
+        self.assertIn("gtm:GTM-AB12CD3", out)
+        self.assertIn("meta:123456789012345", out)
+
+    def test_copyright_authority(self):
+        out = cybercensus._extract_authority(
+            "© 2024 Acme Inc. All rights reserved.")
+        self.assertIn("Acme Inc", out)
+
+    def test_impressum_company(self):
+        out = cybercensus._extract_authority(
+            "Impressum Company: Acme GmbH")
+        self.assertIn("Acme GmbH", out)
+
+    def test_e164_phone(self):
+        out = cybercensus._extract_phones(
+            "Call +44 20 7946 0958 or +1 (555) 123-4567")
+        self.assertIn("+442079460958", out)
+        self.assertIn("+15551234567", out)
+
+    def test_domain_regex_international(self):
+        text = "visit https://acme.co.uk and foo.de and bar.io"
+        found = set(cybercensus._DOMAIN_IN_TEXT_RE.findall(text))
+        self.assertIn("acme.co.uk", found)
+        self.assertIn("foo.de", found)
+        self.assertIn("bar.io", found)
+
+
+class TestIntlEvidenceGrading(unittest.TestCase):
+    def _engine(self, names):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.names = names
+        for n in names:
+            e.anchor["orgs"].add(n)
+        return e
+
+    def test_rdap_org_is_a_evidence(self):
+        e = self._engine(["Acme Corporation"])
+        a = e.add_asset("acme.example", 443, "https")
+        a.rdap_org = "ACME CORP"
+        e.evaluate()
+        self.assertEqual(a.confidence, "确认")
+        self.assertTrue(any(x.startswith("A|RDAP") for x in a.evidence))
+
+    def test_tracking_and_registry_are_b_evidence(self):
+        e = self._engine(["Acme Corporation"])
+        e.anchor["trackings"].add("ga4:G-ABC123XYZ")
+        e.anchor["registry_ids"].add("vat:DE123456789")
+        a = e.add_asset("acme-cdn.example", 443, "https")
+        a.trackings.add("ga4:G-ABC123XYZ")
+        a.registry_ids.add("vat:DE123456789")
+        e.evaluate()
+        self.assertEqual(a.confidence, "确认")
+        self.assertTrue(any("统计/像素ID" in x for x in a.evidence))
+        self.assertTrue(any("官方注册号" in x for x in a.evidence))
+
+    def test_lei_is_a_evidence(self):
+        e = self._engine(["Acme Corporation"])
+        e.anchor["registry_ids"].add("lei:529900T8BM49AURSDO55")
+        a = e.add_asset("acme.example", 443, "https")
+        a.registry_ids.add("lei:529900T8BM49AURSDO55")
+        e.evaluate()
+        self.assertTrue(any(x.startswith("A|LEI") for x in a.evidence))
+
+    def test_verify_candidate_via_rdap(self):
+        e = self._engine(["Acme Corporation"])
+        e.intl_mode = True
+        orig = cybercensus.rdap_lookup
+        cybercensus.rdap_lookup = lambda d, timeout=12: {
+            "orgs": ["Acme Corporation"], "country": "US"}
+        self.addCleanup(cybercensus.__setattr__, "rdap_lookup", orig)
+        self.assertTrue(e._verify_candidate_domain(
+            "Acme Corporation", "acme.example"))
+        self.assertIn("acme.example", e.domains)
+        self.assertIn("Acme Corporation", e.anchor["rdap_orgs"])
+
+    def test_owned_asn_is_a_evidence(self):
+        e = self._engine(["Acme Corporation"])
+        a = e.add_asset("edge.acme.example", 443, "https")
+        a.ip = "203.0.113.7"
+        a.asn = "AS64500"
+        a.asn_org = "ACME CORPORATION"
+        e.asn_owned_ips.add(a.ip)
+        e.evaluate()
+        self.assertTrue(any(x.startswith("A|自有ASN") for x in a.evidence))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

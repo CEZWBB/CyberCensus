@@ -138,7 +138,15 @@ DEFAULT_PORTS = [
 SLD = {
     "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn", "mil.cn",
     "com.hk", "com.tw", "com.mo", "co.uk", "co.jp", "com.au", "com.sg",
-    "com.br", "co.kr", "co.in",
+    "com.br", "co.kr", "co.in", "com.mx", "com.ar", "com.co", "com.pe",
+    "com.cl", "com.ve", "com.ec", "com.uy", "com.py", "com.bo", "com.do",
+    "com.gt", "com.sv", "com.hn", "com.ni", "com.pa", "com.cr", "com.pr",
+    "co.nz", "co.za", "co.il", "co.id", "co.ke", "co.tz", "co.ug",
+    "com.au", "com.sg", "com.my", "com.ph", "com.vn", "com.pk", "com.bd",
+    "com.np", "com.lk", "com.tr", "com.sa", "com.ae", "com.eg", "com.ua",
+    "com.ng", "com.gh", "com.kw", "com.qa", "com.om", "com.bh", "com.jo",
+    "com.lb", "com.cy", "com.mt", "com.pl", "com.pt", "com.gr", "com.ru",
+    "co.at", "or.at", "com.es", "com.de", "co.uk",
 }
 
 
@@ -159,6 +167,9 @@ THIRD_PARTY_SUFFIXES = (
     "netlify.app", "herokuapp.com", "pages.dev", "workers.dev", "r2.dev",
     "oss-cn-", "cos.ap-", "obs.cn-", "bcebos.com", "qiniudn.com", "qbox.me",
     "cloudflare.net", "akamaiedge.net", "edgekey.net", "fastly.net",
+    "wordpress.com", "wixsite.com", "squarespace.com", "myshopify.com",
+    "webflow.io", "github.io", "gitlab.io", "blogspot.com", "godaddysites.com",
+    "azureedge.net", "cloudfront.net", "firebaseapp.com", "web.app",
 )
 
 
@@ -281,6 +292,8 @@ def _org_match(a, b, min_sub=6):
         return False
     if na == nb:
         return True
+    if _is_ascii_name(a) and _is_ascii_name(b):
+        return _org_match_intl(a, b)
     short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
     return len(short) >= min_sub and short in long_
 
@@ -516,6 +529,43 @@ def _operator_candidates(name):
     return out
 
 
+_INTL_TLDS = (".com", ".org", ".net", ".io", ".co", ".de", ".fr", ".es",
+              ".it", ".nl", ".be", ".ch", ".at", ".se", ".no", ".dk", ".fi",
+              ".pl", ".pt", ".ie", ".ca", ".eu", ".co.uk", ".com.au", ".co.nz",
+              ".co.jp", ".co.za", ".com.br", ".com.mx")
+
+
+def _intl_domain_candidates(name, limit=6):
+    """英文主体名 → 可能的官网域名（Acme Corporation → acme.com）。
+
+    和国内"省份缩写+运营商根域"种子同理：只是候选，必须经过 RDAP/
+    页面/证书互证才会成为锚点，所以可以放心猜常见 TLD。
+    """
+    toks = _intl_tokens(name)
+    if not toks:
+        return []
+    slugs = []
+    joined = "".join(toks)
+    if 3 <= len(joined) <= 40:
+        slugs.append(joined)
+    if len(toks) >= 2:
+        two = "".join(toks[:2])
+        if two != joined and 3 <= len(two) <= 40:
+            slugs.append(two)
+        hyph = "-".join(toks[:3])
+        if 3 <= len(hyph) <= 40:
+            slugs.append(hyph)
+    out = []
+    for slug in slugs:
+        for tld in _INTL_TLDS:
+            d = slug + tld
+            if d not in out:
+                out.append(d)
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def _region_alias_query(name):
     """从全称构造"省份 + 行业词"的补充搜索词。
 
@@ -641,6 +691,8 @@ def _org_match_fuzzy(a, b, min_cov=0.6, min_len=4):
     na, nb = _norm_org(a), _norm_org(b)
     if not na or not nb or len(na) < min_len:
         return False
+    if _is_ascii_name(a) and _is_ascii_name(b) and _org_match_intl(a, b):
+        return True
     ga = _bigrams(na)
     if not ga:
         return False
@@ -659,12 +711,159 @@ def _org_related(a, b):
     return na in nb or nb in na
 
 
+# ----------------------------------------------------------------------------
+# 国际目标（非中国站点）的组织名与归属证据
+#
+# 中国目标的 A 级证据（ICP 备案/信用代码/网站标识码/公安备案）在国外不存在。
+# 国外站点改用：RDAP 注册人、证书 O=、目标自有 ASN、LEI/增值税号/公司注册号、
+# 页脚版权/Impressum、统计 ID、联系邮箱/电话、MX/SPF。名字匹配也要支持
+# Ltd/LLC/GmbH/S.A. 等后缀、变音符号和缩写（IBM ↔ International Business Machines）。
+# ----------------------------------------------------------------------------
+_INTL_SUFFIX = (r"(?:Inc\.?|LLC|L\.L\.C\.?|Ltd\.?|Limited|Corp(?:oration)?\.?|"
+                r"Company|Co\.|GmbH|AG|S\.A\.?|SAS|SARL|B\.V\.?|N\.V\.?|"
+                r"Pty\.?\s+Ltd\.?|PLC|K\.K\.?|SpA|S\.p\.A\.|Oy|AB|A/S|ApS|"
+                r"d\.o\.o\.?|Pte\.?\s+Ltd\.?|Sdn\.?\s+Bhd\.?)")
+INTL_LEGAL_SUFFIX_RE = re.compile(
+    r"\b((?:[A-Z][\w&.'’\-]*\s+){0,7}" + _INTL_SUFFIX + r")(?![A-Za-z])")
+
+_INTL_NAME_STOP = frozenset((
+    "welcome", "to", "the", "at", "by", "about", "contact", "home", "official",
+    "website", "of", "and", "for", "visit", "from", "your", "our", "a", "an",
+    "is", "are", "we", "with", "in", "on", "company", "profile", "overview",
+    "news", "press", "release", "read", "more", "view", "this", "that",
+))
+_INTL_GENERIC = frozenset((
+    "the", "and", "of", "for", "a", "an", "inc", "llc", "ltd", "limited",
+    "corp", "corporation", "company", "co", "gmbh", "ag", "sa", "sas", "sarl",
+    "bv", "nv", "pty", "plc", "kk", "spa", "oy", "ab", "as", "aps", "doo",
+    "pte", "sdn", "bhd",
+))
+
+
+def _is_ascii_name(s):
+    """是否以拉丁字母为主（国际目标判定）；纯数字/符号不算。"""
+    s = s or ""
+    letters = [c for c in s if c.isalpha()]
+    if not letters:
+        return False
+    ascii_letters = [c for c in letters if ord(c) < 128]
+    return len(ascii_letters) / len(letters) >= 0.6
+
+
+def _intl_norm(s):
+    """国际组织名归一化：去变音符号、& → and、去标点、小写。"""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.replace("&", " and ")
+    s = re.sub(r"[^0-9A-Za-z]+", " ", s)
+    return s.strip().lower()
+
+
+_INTL_SUFFIX_TAIL_RE = re.compile(r"\s*\b" + _INTL_SUFFIX + r"\s*$", re.I)
+
+
+def _strip_intl_suffix(s):
+    """去掉结尾的 Ltd/LLC/GmbH 等法律后缀（只去后缀，保留主体名）。"""
+    return _INTL_SUFFIX_TAIL_RE.sub("", s or "").strip(" ,.;")
+
+
+def _intl_tokens(s):
+    return [t for t in _intl_norm(_strip_intl_suffix(s)).split()
+            if t not in _INTL_GENERIC]
+
+
+def extract_legal_entities_intl(text, limit=6):
+    """从英文搜索摘要提取法人主体名（Acme Corporation / Foo GmbH ...）。"""
+    out, text = [], text or ""
+    for m in INTL_LEGAL_SUFFIX_RE.finditer(text):
+        seg = re.sub(r"\s+", " ", m.group(1)).strip(" .,;:|")
+        words = seg.split()
+        while words and words[0].lower().strip(".,") in _INTL_NAME_STOP:
+            words.pop(0)
+        seg = " ".join(words).strip(" .,;:|")
+        if not (4 <= len(seg) <= 80) or not _is_ascii_name(seg):
+            continue
+        if len(seg.split()) < 2:
+            continue
+        if seg not in out:
+            out.append(seg)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _org_match_intl(a, b):
+    """英文组织名匹配：去后缀/变音符号后比较词集合、子集与缩写。"""
+    na, nb = _intl_norm(a), _intl_norm(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    ta, tb = _intl_tokens(a), _intl_tokens(b)
+    if not ta or not tb:
+        return False
+    sa, sb = set(ta), set(tb)
+    if sa == sb:
+        return True
+    if sa <= sb or sb <= sa:
+        short = sa if sa <= sb else sb
+        return len(short) >= 2 or len("".join(short)) >= 5
+    # 缩写互证：IBM ↔ International Business Machines
+    for short, long_ in ((na, nb), (nb, na)):
+        if " " not in short and 2 <= len(short) <= 6:
+            base = _intl_norm(_strip_intl_suffix(long_))
+            acr = "".join(t[0] for t in base.split() if t and t[0].isalnum())
+            if short == acr and len(base.split()) >= 2:
+                return True
+    return False
+
+
+def _intl_entity_related(entity, name):
+    """英文主体线索与用户输入是否同一组织（用于过滤搜索里的无关公司）。"""
+    if _org_match_intl(entity, name):
+        return True
+    te, tn = set(_intl_tokens(entity)), set(_intl_tokens(name))
+    if not te or not tn:
+        return False
+    # 至少共享一个"有辨识度"的词（≥4 字符），且共享词占较短名的一半以上
+    shared = {t for t in (te & tn) if len(t) >= 4}
+    return bool(shared) and len(te & tn) / max(1, min(len(te), len(tn))) >= 0.5
+
+
 ANALYTICS_PATTERNS = [
     ("baidu", re.compile(r"hm\.baidu\.com/hm\.js\?([0-9a-f]{32})")),
     ("ga4", re.compile(r"gtag/js\?id=(G-[A-Z0-9]{6,})")),
     ("ga-ua", re.compile(r"ga\('create',\s*'(UA-\d{4,}-\d+)'")),
     ("cnzz", re.compile(r"cnzz\.com/(?:stat\.php\?id=|.*?[?&]id=)(\d{6,})")),
 ]
+
+# 统计/跟踪 ID：同一组织名下多个域名常共用同一个账号，是国际站点的重要 B 级证据
+TRACKING_PATTERNS = [
+    ("ga4", re.compile(r"\b(G-[A-Z0-9]{6,12})\b")),
+    ("ua", re.compile(r"\b(UA-\d{4,10}-\d{1,4})\b")),
+    ("gtm", re.compile(r"\b(GTM-[A-Z0-9]{4,10})\b")),
+    ("meta", re.compile(r"fbq\(\s*['\"]init['\"]\s*,\s*['\"](\d{10,20})['\"]")),
+    ("hotjar", re.compile(r"hjid\s*:\s*['\"]?(\d{4,10})")),
+    ("yandex", re.compile(r"ym\(\s*(\d{6,10})\s*,")),
+    ("matomo", re.compile(r"setSiteId['\"]?\s*,\s*['\"](\d{1,6})['\"]")),
+    ("baidu", re.compile(r"hm\.baidu\.com/hm\.js\?([0-9a-f]{32})")),
+    ("cnzz", re.compile(r"cnzz\.com/(?:stat\.php\?id=|.*?[?&]id=)(\d{6,})")),
+    ("tiktok", re.compile(r"ttq\.load\(\s*['\"](\w{6,})['\"]")),
+]
+
+
+def extract_tracking_ids(text, limit=12):
+    """提取页面里全部统计/像素 ID，返回 ["ga4:G-XXX", ...]。"""
+    out = []
+    plain = str(text or "")
+    for name, pat in TRACKING_PATTERNS:
+        for m in pat.finditer(plain):
+            v = "%s:%s" % (name, m.group(1))
+            if v not in out:
+                out.append(v)
+            if len(out) >= limit:
+                return out
+    return out
 
 # 指纹库（借鉴 ARL/ShuiZe/Goby 的国产组件覆盖）：
 # (显示名, 页面特征列表)；特征为空表示靠 Server 头识别
@@ -1014,15 +1213,29 @@ def _extract_emails(text, limit=8):
 
 PHONE_RE = re.compile(
     r"(?<!\d)(0\d{2,3}[-\s]?\d{7,8}|1[3-9]\d{9}|400[-\s]?\d{3}[-\s]?\d{4})(?!\d)")
+# E.164 国际电话：+44 20 7946 0958 / +1 (555) 123-4567
+INTL_PHONE_RE = re.compile(
+    r"(?<![\d+])\+\d{1,3}[\s.\-]?(?:\(\d{1,4}\)[\s.\-]?)?"
+    r"\d{2,4}(?:[\s.\-]?\d{2,4}){1,4}(?!\d)")
 _PHONE_JUNK = frozenset(("10086", "10010", "10000", "95588", "12345",
                          "4001100000", "4001000000"))
 _AUTHORITY_RE = re.compile(
     r"(?:版权所有|主办单位|承办单位|技术支持|Copyright)\s*[:：]?\s*"
     r"([^\s<|，。;；]{3,60})", re.I)
+# 页脚版权：© 2024 Acme Inc. / Copyright 2024 by Foo GmbH
+_INTL_COPYRIGHT_RE = re.compile(
+    r"(?:©|\(c\)|copyright)\s*(?:\d{4}(?:\s*[-–—]\s*\d{4})?)?\s*(?:by\s+)?"
+    r"([A-Z][A-Za-z0-9&.,'’()\- ]{2,80}?)"
+    r"(?=\s*(?:all rights reserved|\.|,|\||<|\n|$))", re.I)
+# Impressum / mentions légales / aviso legal 里的公司名
+_INTL_COMPANY_RE = re.compile(
+    r"(?:Company|Firma|Unternehmen|Raison sociale|Razón social|"
+    r"Bedrijfsnaam|Registered office|Trade name)\s*[:：]\s*"
+    r"([A-Z][^\n<|]{2,80})", re.I)
 
 
 def _extract_phones(text, limit=8):
-    """页面联系电话（座机/手机/400），过滤运营商客服等公共号码。"""
+    """页面联系电话（座机/手机/400/国际号码），过滤公共客服号码。"""
     out, seen = [], set()
     plain = _strip_tags(text or "")
     for m in PHONE_RE.finditer(plain):
@@ -1033,11 +1246,21 @@ def _extract_phones(text, limit=8):
         out.append(p)
         if len(out) >= limit:
             break
+    # 国际号码：保留 +，去掉空格/连字符/括号后按数字长度过滤（防日期误命中）
+    for m in INTL_PHONE_RE.finditer(plain):
+        p = re.sub(r"[^\d+]", "", m.group(0))
+        digits = p.lstrip("+")
+        if not (8 <= len(digits) <= 16) or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+        if len(out) >= limit:
+            break
     return out
 
 
 def _extract_authority(text, limit=3):
-    """页脚的主办单位 / 版权所有单位（无备案、无证书时的归属线索）。"""
+    """页脚的主办单位 / 版权所有单位（中英文，无备案/证书时的归属线索）。"""
     plain = _strip_tags(text or "")
     out = []
     for m in _AUTHORITY_RE.finditer(plain):
@@ -1045,6 +1268,19 @@ def _extract_authority(text, limit=3):
         v = re.split(r"(?:版权所有|技术支持|网站标识码|ICP备|公网安备)",
                      v)[0].strip()
         if 2 <= len(v) <= 40 and v not in out:
+            out.append(v)
+        if len(out) >= limit:
+            break
+    for m in _INTL_COPYRIGHT_RE.finditer(plain):
+        v = m.group(1).strip(" .,:;|-")
+        v = re.sub(r"^(?:by|the)\s+", "", v, flags=re.I).strip()
+        if 2 <= len(v) <= 60 and v not in out:
+            out.append(v)
+        if len(out) >= limit:
+            break
+    for m in _INTL_COMPANY_RE.finditer(plain):
+        v = m.group(1).strip(" .,:;|-")
+        if 2 <= len(v) <= 60 and v not in out:
             out.append(v)
         if len(out) >= limit:
             break
@@ -1180,6 +1416,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
            "tech": "", "body_len": 0, "credit_code": "", "refs": [], "meta": "",
            "site_code": "", "police_beian": "",
            "emails": [], "phones": [], "authorities": [],
+           "registry_ids": [], "trackings": [],
            "scripts": [], "waf": ""}
     body = ""
     status = ""
@@ -1225,7 +1462,9 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     out["meta"] = _extract_meta(body)                # SPA 站的单位名常在 meta 里
     out["emails"] = _extract_emails(body)            # 页面联系邮箱
     out["phones"] = _extract_phones(body)            # 页面联系电话
-    out["authorities"] = _extract_authority(body)    # 页脚主办/版权单位
+    out["authorities"] = _extract_authority(body)    # 页脚主办/版权单位（中英文）
+    out["registry_ids"] = extract_registry_ids(body)  # LEI/VAT/DUNS/公司注册号
+    out["trackings"] = extract_tracking_ids(body)     # 统计/像素 ID（国际站 B 级证据）
     out["scripts"] = _extract_scripts(body, url)     # 外部 JS（后续挖域名/密钥）
     out["waf"] = detect_waf(
         " ".join("%s:%s" % (k, v) for k, v in hdrs.items()), body)  # 防护设备识别
@@ -1257,6 +1496,45 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     except Exception:
         pass
 
+    return out
+
+
+LEGAL_PAGE_PATHS = ("/imprint", "/impressum", "/mentions-legales",
+                    "/aviso-legal", "/legal", "/impressum.html",
+                    "/privacy", "/about")
+
+
+def probe_legal_pages(host, port, scheme, timeout=6, max_pages=4, throttle=0.0):
+    """抓取 Impressum / mentions légales / aviso legal 等法定披露页。
+
+    国外站点常把公司全称、注册号、VAT、地址、邮箱放在这些页面，
+    首页反而只有营销文案。只在需要补证时调用（最多 4 页），不递归。
+    """
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        base = "%s://%s" % (scheme, host)
+    else:
+        base = "%s://%s:%d" % (scheme, host, port)
+    out = {"emails": [], "phones": [], "authorities": [],
+           "registry_ids": [], "trackings": [], "text": ""}
+    texts = []
+    for path in LEGAL_PAGE_PATHS[:max_pages]:
+        try:
+            _global_throttle(throttle)
+            body = http_get(base + path, timeout=timeout, retries=0,
+                            headers={"User-Agent": _pick_ua()},
+                            max_bytes=200000)
+        except Exception:
+            continue
+        if not body:
+            continue
+        texts.append(_strip_tags(body))
+        for k, vals in (("emails", _extract_emails(body)),
+                        ("phones", _extract_phones(body)),
+                        ("authorities", _extract_authority(body)),
+                        ("registry_ids", extract_registry_ids(body)),
+                        ("trackings", extract_tracking_ids(body))):
+            out[k] = list(dict.fromkeys(out[k] + vals))
+    out["text"] = " ".join(texts)[:20000]
     return out
 
 
@@ -1468,6 +1746,205 @@ def parse_whois(txt):
 
 
 # ----------------------------------------------------------------------------
+# RDAP（whois 的 HTTP/JSON 版）：国外域名最可靠的注册人归属来源
+# 无 Key，rdap.org 按 TLD 自动跳转到对应注册局（ARIN/RIPE/APNIC/LACNIC/AFRINIC）。
+# ----------------------------------------------------------------------------
+def _rdap_vcard(entity):
+    """解析 RDAP entity 的 vCard：返回 (org, fn, email, country)。"""
+    org = fn = email = country = ""
+    va = entity.get("vcardArray") or []
+    if not (isinstance(va, list) and len(va) > 1 and isinstance(va[1], list)):
+        return org, fn, email, country
+    for item in va[1]:
+        if not (isinstance(item, list) and len(item) >= 4):
+            continue
+        key, val = item[0], item[3]
+        if key == "org":
+            vals = val if isinstance(val, list) else [val]
+            org = next((str(v).strip() for v in vals if str(v).strip()), org)
+        elif key == "fn":
+            fn = str(val).strip()
+        elif key == "email":
+            email = str(val).strip()
+        elif key == "adr" and isinstance(val, list):
+            for part in val:
+                p = str(part or "").strip()
+                if len(p) == 2 and p.isalpha():
+                    country = p.upper()
+    return org, fn, email, country
+
+
+def parse_rdap(data):
+    """把 RDAP JSON 压成 {orgs, emails, country, registrar, created}。
+
+    过滤隐私保护占位名（RDAP 里同样常见），且优先采信 registrant 角色。
+    """
+    out = {"orgs": [], "emails": [], "country": "", "registrar": "", "created": ""}
+    seen = set()
+
+    def _clean(v):
+        v = (v or "").strip()
+        if not v or len(v) > 120:
+            return ""
+        if any(m.lower() in v.lower() for m in PRIVACY_ORG_MARKERS):
+            return ""
+        return v
+
+    def _add(v):
+        v = _clean(v)
+        if v and v not in seen:
+            seen.add(v)
+            out["orgs"].append(v)
+
+    def walk(ent, depth=0):
+        if not isinstance(ent, dict) or depth > 5:
+            return
+        roles = [str(r).lower() for r in (ent.get("roles") or [])]
+        org, fn, email, cc = _rdap_vcard(ent)
+        org, fn, email = _clean(org), _clean(fn), _clean(email)
+        if "registrant" in roles:
+            _add(org or fn)
+        elif org or fn:
+            _add(org or fn)
+        if email and email not in out["emails"]:
+            out["emails"].append(email)
+        if cc and not out["country"]:
+            out["country"] = cc
+        if "registrar" in roles:
+            out["registrar"] = fn or org or out["registrar"]
+        for sub in (ent.get("entities") or []):
+            walk(sub, depth + 1)
+
+    for ent in (data.get("entities") or []):
+        walk(ent)
+    for ev in (data.get("events") or []):
+        if str(ev.get("eventAction", "")).lower() in ("registration", "registered"):
+            out["created"] = str(ev.get("eventDate") or "")[:19]
+    if not out["country"] and data.get("country"):
+        out["country"] = str(data.get("country")).upper()[:2]
+    return out
+
+
+def rdap_lookup(domain, timeout=12):
+    """查询 RDAP（rdap.org 自动路由），失败返回 {}，不影响主流程。"""
+    domain = (domain or "").strip().lower()
+    if not domain:
+        return {}
+    try:
+        url = "https://rdap.org/domain/" + urllib.parse.quote(domain)
+        txt = http_get(url, timeout=timeout, retries=1,
+                       headers={"Accept": "application/rdap+json, application/json"})
+        data = json.loads(txt)
+        if not isinstance(data, dict):
+            return {}
+        out = parse_rdap(data)
+        out["source"] = "rdap"
+        return out
+    except Exception as e:
+        log("RDAP(%s) 失败: %s" % (domain, str(e)[:80]), "!")
+        return {}
+
+
+# ----------------------------------------------------------------------------
+# 目标自有 ASN（Team Cymru DNS，免费无 Key）：AS 名称与主体名互证时，
+# 该 AS 下的 IP 属于目标组织。国外单位常以自有 ASN/地址段暴露资产。
+# ----------------------------------------------------------------------------
+def _dns_txt(name, timeout=8):
+    if HAVE_DNS:
+        try:
+            ans = dns.resolver.resolve(name, "TXT", lifetime=timeout)
+            parts = []
+            for r in ans:
+                try:
+                    parts.append(b"".join(r.strings).decode("utf-8", "replace"))
+                except Exception:
+                    parts.append(str(r))
+            return " ".join(parts)
+        except Exception:
+            pass
+    try:
+        import subprocess
+        p = subprocess.run(["nslookup", "-type=TXT", name],
+                           capture_output=True, timeout=timeout)
+        txt = (p.stdout or b"").decode("utf-8", "replace")
+        return " ".join(re.findall(r'text\s*=\s*"([^"]+)"', txt, re.I))
+    except Exception:
+        return ""
+
+
+def parse_asn_txt(txt):
+    """解析 Team Cymru：'15169 | 8.8.8.0/24 | US | arin | 1992-12-01'。"""
+    m = re.search(r"\b(?:AS)?(\d{1,10})\s*\|\s*([0-9a-fA-F:./]+)\s*\|\s*([A-Z]{2})\s*\|",
+                  txt or "")
+    if not m:
+        return {}
+    return {"asn": "AS" + m.group(1), "prefix": m.group(2), "country": m.group(3)}
+
+
+def asn_info(ip, timeout=8):
+    """IP → ASN/归属 AS 名称（Team Cymru DNS）。失败返回 {}。"""
+    ip = (ip or "").strip()
+    if not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", ip):
+        return {}
+    rev = ".".join(reversed(ip.split("."))) + ".origin.asn.cymru.com"
+    out = parse_asn_txt(_dns_txt(rev, timeout))
+    if not out:
+        return {}
+    atxt = _dns_txt("%s.asn.cymru.com" % out["asn"], timeout)
+    m = re.search(r"\|\s*([A-Z]{2})\s*\|[^|]*\|[^|]*\|\s*(.+)$", atxt)
+    if m:
+        out["country"] = m.group(1)
+        out["name"] = m.group(2).strip().strip('"').strip()
+    return out
+
+
+# ----------------------------------------------------------------------------
+# 官方注册号（LEI / VAT / DUNS / 公司注册号）：国际站点的"身份证"
+# ----------------------------------------------------------------------------
+def _lei_ok(lei):
+    """ISO 17442 校验：字母按 10-35 展开，整个 20 位字符串 mod 97 == 1。"""
+    lei = (lei or "").strip().upper()
+    if not re.match(r"^[A-Z0-9]{20}$", lei):
+        return False
+    digits = "".join(str(int(c, 36)) for c in lei)
+    try:
+        return int(digits) % 97 == 1
+    except Exception:
+        return False
+
+
+LEI_RE = re.compile(r"(?<![A-Z0-9])([A-Z0-9]{20})(?![A-Z0-9])")
+VAT_RE = re.compile(
+    r"(?:VAT|USt[-\s]?IdNr|TVA|IVA|BTW|NIF|CIF|Partita\s+IVA)"
+    r"[.:\s#]*([A-Z]{2}[0-9A-Z]{7,12})", re.I)
+DUNS_RE = re.compile(r"(?:D-?U-?N-?S|DUNS)[^\d]{0,12}(\d{9})", re.I)
+CRN_RE = re.compile(
+    r"(?:Company\s+(?:No|Number|Registration\s+No)|Handelsregister|HRB|CRN)"
+    r"[.:\s#]*([A-Z0-9][A-Z0-9./\-]{4,15})", re.I)
+EIN_RE = re.compile(r"\bEIN[.:\s#]*(\d{2}-\d{7})\b", re.I)
+
+
+def extract_registry_ids(text, limit=8):
+    """提取 LEI/VAT/DUNS/公司注册号/EIN，返回 ["lei:...", "vat:...", ...]。"""
+    out = []
+    text = str(text or "")
+    for m in LEI_RE.finditer(text.upper()):
+        if _lei_ok(m.group(1)):
+            v = "lei:" + m.group(1)
+            if v not in out:
+                out.append(v)
+    for kind, pat in (("vat", VAT_RE), ("duns", DUNS_RE),
+                      ("crn", CRN_RE), ("ein", EIN_RE)):
+        for m in pat.finditer(text):
+            v = "%s:%s" % (kind, m.group(1).strip().upper().replace(" ", ""))
+            if v not in out:
+                out.append(v)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
+# ----------------------------------------------------------------------------
 # 第三方数据源
 # ----------------------------------------------------------------------------
 def crt_subdomains(domain, timeout=25):
@@ -1538,13 +2015,27 @@ SEARCH_JUNK_ROOTS = frozenset((
     # 视频/电商/工具站
     "bilibili.com", "iqiyi.com", "taobao.com", "jd.com", "pinduoduo.com",
     "alipay.com", "amap.com", "bdimg.com", "bdstatic.com", "bdcdn.network",
+    # 国际搜索引擎 / 百科 / 社交 / 目录（国外目标搜索的高发干扰源）
+    "google.com", "googleusercontent.com", "gstatic.com", "youtube.com",
+    "wikipedia.org", "facebook.com", "instagram.com", "twitter.com",
+    "linkedin.com", "crunchbase.com", "bloomberg.com", "glassdoor.com",
+    "indeed.com", "trustpilot.com", "yelp.com", "amazon.com", "apple.com",
+    "duckduckgo.com", "mojeek.com", "brave.com", "yandex.com", "yahoo.com",
+    "github.com", "gitlab.com", "medium.com", "reddit.com", "quora.com",
+    "companieshouse.gov.uk", "handelsregister.de", "northdata.com",
+    "opencorporates.com", "lei-lookup.com", "dnb.com", "zoominfo.com",
+    "wordpress.org", "wix.com", "squarespace.com", "shopify.com",
+    "cloudflare.com",
 ))
 
 # 注意：不排除斜杠前缀——URL 形式（https://gh.x.com）的域名引用必须能提取
+_TLD_ALT = (r"(?:com|net|org|edu|gov|mil|int|io|co|ai|app|dev|cloud|tech|"
+            r"info|biz|eu|de|fr|es|it|nl|be|ch|at|se|no|dk|fi|pl|cz|pt|"
+            r"ie|uk|us|ca|au|nz|jp|kr|sg|hk|tw|cn|in|br|mx|ru|za|ae|il|"
+            r"tr|me|tv|cc|xyz|top|vip)")
 _DOMAIN_IN_TEXT_RE = re.compile(
-    r"(?<![\w.\-])((?:[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}\.)+"
-    r"(?:com|net|org|cn|gov|edu|info|xyz|top|vip|cc|hk|mo|tw)(?:\.cn)?)"
-    r"(?![\w.\-])")
+    r"(?<![\w.\-])((?:[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}\.)+" + _TLD_ALT +
+    r"(?:\.[a-z]{2})?)(?![\w.\-])")
 
 # 页面正文/JS 里出现的技术域/公共设施域：外链挖掘时排除（不作为候选资产）
 PAGE_JUNK_ROOTS = SEARCH_JUNK_ROOTS | frozenset((
@@ -1708,14 +2199,25 @@ def search_engine_lookup(name, timeout=15):
 
     失败/被拦截返回 ("", [])。单次、不重试翻页，控制对搜索引擎的触碰。
     """
+    intl = _is_intl_query(name)
     try:
-        url = ("https://cn.bing.com/search?q=" + urllib.parse.quote(name)
-               + "&count=20&mkt=zh-CN")
+        if intl:
+            url = ("https://www.bing.com/search?q=" + urllib.parse.quote(name)
+                   + "&count=20&setlang=en&cc=US")
+        else:
+            url = ("https://cn.bing.com/search?q=" + urllib.parse.quote(name)
+                   + "&count=20&mkt=zh-CN")
         # 搜索引擎查询用固定 UA：轮换 UA 反而容易触发人机验证
         html = http_get(url, timeout=timeout, retries=1,
                         headers={"Accept": "text/html, */*", "User-Agent": UA})
         hosts = [h.lower() for h
                  in re.findall(r'<h2><a[^>]+href="https?://([^/\"]+)', html)]
+        if not hosts and intl:
+            # Bing 返回空壳（限流）时用 DuckDuckGo 兜底
+            ddg = _duckduckgo_urls(name, timeout=timeout)
+            if ddg:
+                hosts = [h for h in (_url_host(u) for u in ddg) if h]
+                html = " ".join(ddg)
         return _strip_tags(html), hosts
     except Exception as e:
         log("搜索引擎查询失败(%s): %s" % (name, str(e)[:80]), "!")
@@ -1730,8 +2232,12 @@ def search_result_urls(query, timeout=15):
     """
     urls = []
     try:
-        url = ("https://cn.bing.com/search?q=" + urllib.parse.quote(query)
-               + "&count=20&mkt=zh-CN")
+        if _is_intl_query(query):
+            url = ("https://www.bing.com/search?q=" + urllib.parse.quote(query)
+                   + "&count=20&setlang=en&cc=US")
+        else:
+            url = ("https://cn.bing.com/search?q=" + urllib.parse.quote(query)
+                   + "&count=20&mkt=zh-CN")
         html = http_get(url, timeout=timeout, retries=1,
                         headers={"Accept": "text/html, */*", "User-Agent": UA})
         for m in re.finditer(r'<h2><a[^>]+href="(https?://[^"]+)"', html):
@@ -1840,11 +2346,80 @@ def _sogou_urls(query, timeout=15):
     return urls[:20]
 
 
+def _clean_search_url(u):
+    u = (u or "").replace("&amp;", "&").strip()
+    if u.startswith("//duckduckgo.com/l/"):
+        try:
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit("https:" + u).query)
+            u = (q.get("uddg") or [""])[0]
+        except Exception:
+            return ""
+    if u.startswith("//"):
+        u = "https:" + u
+    return u if u.startswith("http") else ""
+
+
+def _duckduckgo_urls(query, timeout=15):
+    """DuckDuckGo HTML 版（无 Key、无验证码），国际目标的主力免费引擎。"""
+    urls = []
+    try:
+        url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+        html = http_get(url, timeout=timeout, retries=1,
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        for m in re.finditer(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*>', html):
+            href = re.search(r'href="([^"]+)"', m.group(0))
+            if not href:
+                continue
+            u = _clean_search_url(href.group(1))
+            if not u or "duckduckgo.com" in u:
+                continue
+            if u not in urls:
+                urls.append(u)
+    except Exception:
+        pass
+    return urls[:20]
+
+
+def _mojeek_urls(query, timeout=15):
+    """Mojeek（独立索引，对脚本抓取相对友好），补充 DDG/Bing 覆盖。"""
+    urls = []
+    try:
+        url = "https://www.mojeek.com/search?q=" + urllib.parse.quote(query)
+        html = http_get(url, timeout=timeout, retries=1,
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        for m in re.finditer(r'<a[^>]+class="[^"]*\bob\b[^"]*"[^>]*>', html):
+            href = re.search(r'href="([^"]+)"', m.group(0))
+            if not href:
+                continue
+            u = _clean_search_url(href.group(1))
+            if u and "mojeek.com" not in u and u not in urls:
+                urls.append(u)
+        if not urls:
+            for m in re.finditer(r"<h2[^>]*>\s*<a[^>]+href=\"(https?://[^\"]+)\"",
+                                 html):
+                u = _clean_search_url(m.group(1))
+                if u and "mojeek.com" not in u and u not in urls:
+                    urls.append(u)
+    except Exception:
+        pass
+    return urls[:20]
+
+
+def _is_intl_query(query):
+    """查询是否需要国外引擎优先（无中文字符）。"""
+    return not re.search(r"[一-龥]", query or "")
+
+
 def search_multi_urls(query, timeout=15):
-    """多引擎内容检索：Bing + 360 + 百度 + 搜狗，失败自动跳过并去重。"""
+    """多引擎内容检索：中文目标 Bing/360/百度/搜狗，国际目标 Bing/DDG/Mojeek。"""
+    if _is_intl_query(query):
+        fns = (search_result_urls, _duckduckgo_urls, _mojeek_urls,
+               search_360_urls)
+    else:
+        fns = (search_result_urls, search_360_urls, _baidu_urls,
+               _sogou_urls, _duckduckgo_urls)
     out, seen = [], set()
-    for fn in (search_result_urls, search_360_urls, _baidu_urls,
-               _sogou_urls):
+    for fn in fns:
         try:
             urls = fn(query)
         except Exception:
@@ -1854,6 +2429,63 @@ def search_multi_urls(query, timeout=15):
                 seen.add(u)
                 out.append(u)
     return out
+
+
+def parse_wikidata_search(data):
+    """Wikidata wbsearchentities → [(qid, label, description), ...]。"""
+    out = []
+    for item in (data or {}).get("search", []) or []:
+        qid = item.get("id") or ""
+        if not qid:
+            continue
+        out.append((qid, item.get("label") or "",
+                    item.get("description") or ""))
+    return out
+
+
+def parse_wikidata_official_sites(data, qid):
+    """Wikidata EntityData → P856（官方网站）主机列表。"""
+    ent = ((data or {}).get("entities") or {}).get(qid) or {}
+    out = []
+    for claim in (ent.get("claims") or {}).get("P856", []) or []:
+        try:
+            url = claim["mainsnak"]["datavalue"]["value"]
+        except Exception:
+            continue
+        host = _url_host(str(url))
+        if host and host not in out:
+            out.append(host)
+    return out
+
+
+def wikidata_official_domains(name, timeout=10, limit=3):
+    """用 Wikidata 的官方网站（P856）给英文主体找官网候选。
+
+    纯公开 API、无 Key。只在国外目标名称自举时调用；网络不可达/无匹配
+    时静默返回空，不影响主流程。候选仍要经过 RDAP/页面互证。
+    """
+    out = []
+    try:
+        url = ("https://www.wikidata.org/w/api.php?action=wbsearchentities"
+               "&search=" + urllib.parse.quote(name)
+               + "&language=en&uselang=en&format=json&limit=5")
+        data = json.loads(http_get(url, timeout=timeout, retries=0,
+                                   headers={"Accept": "application/json"}))
+        for qid, label, _desc in parse_wikidata_search(data):
+            if not label or not _org_match_intl(label, name):
+                continue
+            eurl = ("https://www.wikidata.org/wiki/Special:EntityData/%s.json"
+                    % urllib.parse.quote(qid))
+            edata = json.loads(http_get(eurl, timeout=timeout, retries=0,
+                                        headers={"Accept": "application/json"}))
+            for host in parse_wikidata_official_sites(edata, qid):
+                if host not in out:
+                    out.append(host)
+            if len(out) >= limit:
+                break
+    except Exception:
+        return out[:limit]
+    return out[:limit]
 
 
 def discover_domains_from_search(name, max_candidates=5, lookup=None):
@@ -2307,7 +2939,8 @@ class Asset(object):
                  "error", "prov_kinds", "providers", "prov_beian", "prov_cert",
                  "prov_org", "reject_reason", "urls", "findings", "credit_code",
                  "emails", "phones", "authorities", "refs",
-                 "site_code", "police_beian")
+                 "site_code", "police_beian", "rdap_org", "rdap_country",
+                 "trackings", "registry_ids", "asn", "asn_org")
 
     def __init__(self, host, port=None, scheme=None):
         self.host = host
@@ -2343,6 +2976,12 @@ class Asset(object):
         self.refs = set()         # 页面引用的外部域名（互链证据）
         self.site_code = ""       # 政府网站标识码
         self.police_beian = ""    # 公安联网备案号
+        self.rdap_org = ""        # RDAP/WHOIS 注册组织（国际站点 A 级证据）
+        self.rdap_country = ""    # RDAP 注册国家/地区
+        self.trackings = set()    # 统计/像素 ID 全集
+        self.registry_ids = set() # LEI/VAT/DUNS/公司注册号
+        self.asn = ""             # 所属 ASN（Team Cymru）
+        self.asn_org = ""         # AS 注册名称（与主体名吻合时作证据）
 
     def key(self):
         p = self.port or (443 if self.scheme == "https" else 80 if self.scheme == "http" else "")
@@ -2361,11 +3000,13 @@ class Asset(object):
 def _merge_assets(dst, src):
     """字段级合并：集合字段取并集，标量字段空才填（src 的证据不覆盖 dst 已有值）。"""
     for s in ("source", "providers", "prov_kinds", "urls", "findings",
-              "emails", "phones", "authorities", "refs"):
+              "emails", "phones", "authorities", "refs", "trackings",
+              "registry_ids"):
         getattr(dst, s).update(getattr(src, s))
     for s in ("ip", "title", "server", "scheme", "status", "beian", "prov_beian",
               "prov_cert", "prov_org", "cert_org", "cert_san", "analytics",
-              "favicon", "credit_code", "site_code", "police_beian"):
+              "favicon", "credit_code", "site_code", "police_beian",
+              "rdap_org", "rdap_country", "asn", "asn_org"):
         if not getattr(dst, s):
             setattr(dst, s, getattr(src, s))
 
@@ -2583,7 +3224,9 @@ class Engine(object):
                        "favicon": set(), "ips": set(), "domains": set(),
                        "weak_domains": set(), "credit_codes": set(),
                        "emails": set(), "phones": set(), "authorities": set(),
-                       "site_codes": set(), "police_beians": set()}
+                       "site_codes": set(), "police_beians": set(),
+                       "trackings": set(), "registry_ids": set(),
+                       "rdap_orgs": set(), "asns": set()}
         self.ip_notes = {}        # ip -> info dict
         self.provider_records = []
         self.provider_stats = {}
@@ -2601,6 +3244,10 @@ class Engine(object):
         self.ext_hits = []              # 外部工具 nuclei 命中 [(模板, 级别, 名称, 位置), ...]
         self.ext_used = {}              # 本轮实际调用的外部工具 {名称: 路径}
         self.ext_detected = set()       # 本机检测到的外部工具（含本轮未调用的）
+        self._rdap_cache = {}           # 根域 -> RDAP 结果
+        self.asn_owned_ips = set()      # 与主体名互证通过的自有 ASN IP
+        self.intl_mode = any(_is_ascii_name(n) and not re.search(r"[一-龥]", n or "")
+                             for n in self.names)
 
     # ---- 资产登记 ----
     def add_asset(self, host, port=None, scheme=None, source="", ip=None):
@@ -2710,9 +3357,17 @@ class Engine(object):
                             % (v, ", ".join(d for d, _ in add_v)), "+")
                 # 运营商/省级政府：域名知识库直接补省级候选（不依赖搜索引擎）
                 district = _district_candidates(name)
+                wiki_hosts = (wikidata_official_domains(name, timeout=6)
+                              if _is_ascii_name(name) else [])
+                if wiki_hosts:
+                    log("Wikidata 官方网站候选: %s" % ", ".join(wiki_hosts), "+")
                 fixed = list(dict.fromkeys(
                     _operator_candidates(name) + _gov_candidates(name)
-                    + district + list(self.intel.get("seed_domains") or [])))
+                    + district
+                    + (_intl_domain_candidates(name)
+                       if _is_ascii_name(name) else [])
+                    + wiki_hosts
+                    + list(self.intel.get("seed_domains") or [])))
                 if fixed:
                     have = {d for d, _ in cands}
                     add = [(d, 20) for d in fixed if d not in have]
@@ -2768,6 +3423,12 @@ class Engine(object):
                     root = root_domain(dom)
                     if not root or root in SEARCH_JUNK_ROOTS:
                         continue
+                    # 国际目标：纯被动候选必须 RDAP 注册人互证，避免把
+                    # 搜索结果里的百科/政府/媒体站点当弱锚点
+                    if (_is_ascii_name(name) and dom not in wiki_hosts
+                            and not self._intl_rdap_match(name, dom)):
+                        log("  跳过未通过 RDAP 互证的英文候选: %s" % dom, "!")
+                        continue
                     # 候选保留主机名而不是一律截到根域：
                     # "四川移动" 的 wap.sc.10086.cn 只补省级父域 sc.10086.cn，
                     # 不把全国共用的 10086.cn 当弱锚点（否则全国资产都被拉进来）
@@ -2798,10 +3459,15 @@ class Engine(object):
             # 搜索多轮：候选域名 + 摘要里的备案号/信用代码/邮箱（A 级锚点）。
             # - name+"官网"：简称/短名提高官网命中率
             # - name+"ICP备案"：从备案信息页摘要吸收备案号（ENscan 备案维度的免费等效）
+            intl = _is_ascii_name(name) and _is_intl_query(name)
             lookups = [search_engine_lookup(name)]
-            if len(name) <= 6:
-                lookups.append(search_engine_lookup(name + " 官网"))
-            lookups.append(search_engine_lookup(name + " ICP备案"))
+            if intl:
+                lookups.append(search_engine_lookup(name + " official website"))
+                lookups.append(search_engine_lookup(name + " headquarters"))
+            else:
+                if len(name) <= 6:
+                    lookups.append(search_engine_lookup(name + " 官网"))
+                lookups.append(search_engine_lookup(name + " ICP备案"))
             alias = _region_alias_query(name)
             alias_q = alias if (alias and alias != name) else name
             if any(k in name for k in _OPERATOR_KEYS):
@@ -2842,9 +3508,15 @@ class Engine(object):
                     if cands:
                         log("Bing 无候选，360 搜索补充: %s"
                             % ", ".join(d for d, _ in cands), "+")
+            wiki_hosts = (wikidata_official_domains(name, timeout=6)
+                          if intl else [])
+            if wiki_hosts:
+                log("Wikidata 官方网站候选: %s" % ", ".join(wiki_hosts), "+")
             fixed = list(dict.fromkeys(
                 _operator_candidates(name) + _gov_candidates(name)
                 + _district_candidates(name)
+                + (_intl_domain_candidates(name) if intl else [])
+                + wiki_hosts
                 + list(self.intel.get("seed_domains") or [])))
             if fixed:
                 have = {d for d, _ in cands}
@@ -2880,7 +3552,8 @@ class Engine(object):
         """把候选验证时的页面信息落到资产上，供 evaluate 做联系信息证据判定。"""
         a = self.add_asset(dom, None, None, source="verify")
         for k in ("title", "server", "beian", "credit_code",
-                  "site_code", "police_beian"):
+                  "site_code", "police_beian", "rdap_org", "rdap_country",
+                  "asn", "asn_org"):
             v = info.get(k)
             if v and not getattr(a, k):
                 setattr(a, k, v)
@@ -2890,7 +3563,54 @@ class Engine(object):
         a.phones.update(info.get("phones") or [])
         a.authorities.update(info.get("authorities") or [])
         a.refs.update(info.get("refs") or [])
+        a.trackings.update(info.get("trackings") or [])
+        a.registry_ids.update(info.get("registry_ids") or [])
         return a
+
+    def _rdap_for(self, host):
+        """根域 RDAP 查询（带缓存）。国外域名判断归属的第一证据。"""
+        root = root_domain(host) or (host or "").lower()
+        if not root:
+            return {}
+        if root in self._rdap_cache:
+            return self._rdap_cache[root]
+        info = rdap_lookup(root, timeout=min(12, getattr(self.args, "timeout", 8) + 4))
+        self._rdap_cache[root] = info or {}
+        return self._rdap_cache[root]
+
+    def _rdap_hit(self, host, names):
+        """RDAP 注册组织是否与主体名一致；一致则记入资产与锚点。"""
+        rd = self._rdap_for(host)
+        for o in (rd.get("orgs") or []):
+            if any(n and _org_match(n, o) for n in names):
+                self.anchor["rdap_orgs"].add(o)
+                self.anchor["orgs"].add(o)
+                return o, rd
+        return "", rd
+
+    def _intl_rdap_match(self, name, dom):
+        """纯被动模式：英文候选域名先查 RDAP 注册人，不碰目标主机。
+
+        RDAP 是第三方注册局数据，符合"纯被动"约束；注册人拿不到/不互证时
+        宁可不收——否则 gov.uk、britannica.com 这类搜索结果会把台账污染。
+        """
+        rd = self._rdap_for(dom)
+        return any(o and _org_match(name, o) for o in (rd.get("orgs") or []))
+
+    def _apply_asn(self, a, names):
+        """IP → ASN；AS 注册名称与主体名吻合时，该 IP 视为目标自有地址。"""
+        if not a.ip:
+            return
+        info = asn_info(a.ip)
+        if not info:
+            return
+        a.asn = info.get("asn", "")
+        name = info.get("name", "")
+        if name and any(n and (_org_match(n, name) or _org_related(n, name))
+                        for n in names):
+            a.asn_org = name
+            self.anchor["asns"].add(a.asn)
+            self.asn_owned_ips.add(a.ip)
 
     def _verify_candidate_domain(self, name, dom):
         """探测候选域名首页，标题 / 证书 O= / 统一社会信用代码 任一互证即通过。
@@ -2911,6 +3631,18 @@ class Engine(object):
         brands.discard("")
         root = root_domain(dom)
         label = dom.split(".")[0].lower()
+
+        # 国外站点：RDAP 注册组织是最接近"备案"的权威归属证据
+        rd_org, rd = ("", {})
+        if getattr(self, "intl_mode", False) or _is_ascii_name(name):
+            rd_org, rd = self._rdap_hit(dom, names)
+        if rd_org:
+            info = {"rdap_org": rd_org,
+                    "rdap_country": rd.get("country", "")}
+            self._remember_asset(dom, info)
+            log("  RDAP 注册人互证: %s → %s" % (dom, rd_org), "+")
+            self._add_verified_domain(dom)
+            return True
 
         for scheme, port in (("https", 443), ("http", 80)):
             info = http_probe(dom, port, scheme, timeout=self.args.timeout)
@@ -2937,6 +3669,17 @@ class Engine(object):
                         for o in names) for x in auths):
                 self._remember_asset(dom, info)
                 self._add_verified_domain(dom)
+                return True
+            # 国际站：统计/像素 ID 或官方注册号与锚点一致（同一账号/同一法人）
+            if set(info.get("trackings") or []) & self.anchor["trackings"]:
+                self._remember_asset(dom, info)
+                self._add_verified_domain(dom)
+                log("  统计ID互证: %s" % dom, "+")
+                return True
+            if set(info.get("registry_ids") or []) & self.anchor["registry_ids"]:
+                self._remember_asset(dom, info)
+                self._add_verified_domain(dom)
+                log("  官方注册号互证: %s" % dom, "+")
                 return True
             # 页面反向链接到目标主域（互链归属）
             if set(info.get("refs") or []) & set(self.anchor["domains"]):
@@ -2972,6 +3715,26 @@ class Engine(object):
                         if root in OPERATOR_ROOTS.get(b, ()) and b in org:
                             self._add_verified_domain(dom)
                             return True
+        # 国外站点兜底：首页没线索时查 Impressum / mentions légales / aviso legal
+        if getattr(self, "intl_mode", False):
+            for scheme, port in (("https", 443), ("http", 80)):
+                try:
+                    lp = probe_legal_pages(dom, port, scheme,
+                                           timeout=getattr(self.args, "timeout", 8))
+                except Exception:
+                    continue
+                if not lp.get("text"):
+                    continue
+                if (set(lp["emails"]) & self.anchor["emails"]
+                        or set(lp["phones"]) & self.anchor["phones"]
+                        or set(lp["trackings"]) & self.anchor["trackings"]
+                        or set(lp["registry_ids"]) & self.anchor["registry_ids"]
+                        or any(any(o and (_org_match(o, x) or _org_match_fuzzy(o, x))
+                                   for o in names) for x in lp["authorities"])):
+                    self._remember_asset(dom, lp)
+                    self._add_verified_domain(dom)
+                    log("  法定披露页互证: %s" % dom, "+")
+                    return True
         return False
 
     def _add_verified_domain(self, dom):
@@ -3011,12 +3774,30 @@ class Engine(object):
                 self.anchor["ips"].add(ip)
                 self.sub_map.setdefault(d, ip)
             if not probe:
+                if getattr(self, "intl_mode", False):
+                    rd_org, rd = self._rdap_hit(
+                        d, set(self.names) | set(self.anchor["orgs"]))
+                    if rd_org:
+                        log("  RDAP 注册人（锚点）: %s | %s"
+                            % (rd_org, rd.get("country", "")), "+")
                 continue
             a = self.add_asset(d, None, "https", source="anchor")
             if not ipset:
                 a.error = "DNS 解析失败"
                 continue
             a.ip = sorted(ipset)[0]
+            if getattr(self, "intl_mode", False):
+                rd_org, rd = self._rdap_hit(
+                    d, set(self.names) | set(self.anchor["orgs"]))
+                if rd_org:
+                    a.rdap_org = rd_org
+                    a.rdap_country = rd.get("country", "")
+                    log("  RDAP 注册人（锚点）: %s | %s"
+                        % (rd_org, a.rdap_country), "+")
+                elif rd.get("orgs"):
+                    log("  RDAP 注册人（未与主体名互证，仅记录）: %s"
+                        % rd["orgs"][0][:60])
+                self._apply_asn(a, set(self.names) | set(self.anchor["orgs"]))
             chosen = None
             for scheme, port in (("https", 443), ("http", 80)):
                 info = http_probe(d, port, scheme, timeout=self.args.timeout)
@@ -3059,6 +3840,16 @@ class Engine(object):
                     self.anchor["site_codes"].add(a.site_code)
                 if a.police_beian:
                     self.anchor["police_beians"].add(a.police_beian)
+                a.trackings.update(info.get("trackings") or [])
+                a.registry_ids.update(info.get("registry_ids") or [])
+                self.anchor["trackings"].update(a.trackings)
+                self.anchor["registry_ids"].update(a.registry_ids)
+                if a.trackings:
+                    log("  锚点统计/像素ID: %s"
+                        % "、".join(sorted(a.trackings)[:6]), "+")
+                if a.registry_ids:
+                    log("  锚点官方注册号: %s"
+                        % "、".join(sorted(a.registry_ids)[:6]), "+")
                 self._js_urls.extend(info.get("scripts") or [])
                 self._apply_waf(a, info.get("waf", ""))
                 if a.analytics:
@@ -3231,8 +4022,22 @@ class Engine(object):
         for ip in sorted(all_ips):
             log("IP 归属/反查: %s" % ip)
             info = ip_info(ip)
+            # Team Cymru：AS 名称可用于"自有 ASN"归属（仅国际目标，省一次 DNS）
+            ai = asn_info(ip) if getattr(self, "intl_mode", False) else {}
+            if ai:
+                self.ip_notes.setdefault(ip, {})
+                self.ip_notes[ip]["asn"] = ai.get("asn", "")
+                self.ip_notes[ip]["asn_name"] = ai.get("name", "")
+                self.ip_notes[ip]["asn_country"] = ai.get("country", "")
+                if ai.get("name") and any(
+                        _org_match(n, ai["name"]) or _org_related(n, ai["name"])
+                        for n in self.names):
+                    self.anchor["asns"].add(ai.get("asn", ""))
+                    self.asn_owned_ips.add(ip)
+                    log("  自有 ASN 与主体名吻合: %s | %s"
+                        % (ai.get("asn", ""), ai.get("name", "")), "+")
             if info:
-                self.ip_notes[ip] = info
+                self.ip_notes.setdefault(ip, {}).update(info)
                 org = info.get("org") or info.get("isp") or ""
                 asn = info.get("as") or ""
                 # ip-api 返回的是 ISP/AS 归属组织（如 "Hangzhou Alibaba Advertising..."），
@@ -3282,16 +4087,33 @@ class Engine(object):
                 if pf not in self.ip_notes[ip]["prefixes"]:
                     self.ip_notes[ip]["prefixes"].append(pf)
 
-        # Whois
+        # Whois + RDAP（RDAP 是国外域名的主通道；whois 隐私保护时自动补位）
         for d in list(self.domains):
             w = parse_whois(whois_query(d))
             org = w.get("org") or ""
-            if org:
-                if any(m in org for m in PRIVACY_ORG_MARKERS):
-                    log("whois(%s) 注册人为隐私保护占位（%s），不进锚点" % (d, org))
-                else:
-                    self.anchor["orgs"].add(org)
-                    log("whois(%s) 注册人: %s" % (d, org))
+            private = any(m in org for m in PRIVACY_ORG_MARKERS)
+            if org and not private:
+                self.anchor["orgs"].add(org)
+                log("whois(%s) 注册人: %s" % (d, org))
+            elif private:
+                log("whois(%s) 注册人为隐私保护占位（%s），改用 RDAP" % (d, org))
+            if (not org or private) and getattr(self, "intl_mode", False):
+                rd = self._rdap_for(d)
+                rd_org = next((o for o in (rd.get("orgs") or [])
+                               if not any(m.lower() in o.lower()
+                                          for m in PRIVACY_ORG_MARKERS)), "")
+                if rd_org:
+                    a = self.add_asset(d, None, None, source="rdap")
+                    a.rdap_org = rd_org
+                    a.rdap_country = rd.get("country", "")
+                    if any(n and _org_match(n, rd_org) for n in self.names):
+                        self.anchor["rdap_orgs"].add(rd_org)
+                        self.anchor["orgs"].add(rd_org)
+                        log("RDAP(%s) 注册人与主体互证: %s | %s"
+                            % (d, rd_org, a.rdap_country), "+")
+                    else:
+                        log("RDAP(%s) 注册人（未互证，仅记录）: %s"
+                            % (d, rd_org))
 
     @staticmethod
     def _guess_root(host):
@@ -3700,9 +4522,31 @@ class Engine(object):
             if a.cert_org and any(_org_match(o, a.cert_org) for o in orgs):
                 ev.append("A|证书O=一致:%s" % a.cert_org)
                 A += 1
+            # 国际站点：RDAP 注册人（最接近备案的权威归属）与自有 ASN
+            if a.rdap_org and any(_org_match(o, a.rdap_org) for o in orgs):
+                ev.append("A|RDAP注册人一致:%s" % a.rdap_org[:40])
+                A += 1
+            if a.asn_org and a.ip and a.ip in self.asn_owned_ips:
+                ev.append("A|自有ASN:%s %s" % (a.asn or "", a.asn_org[:30]))
+                A += 1
             if a.analytics and a.analytics in self.anchor["analytics"]:
                 ev.append("B|统计ID一致:%s" % a.analytics)
                 B += 1
+            # 国际站点：GA/GTM/Meta/Hotjar 等统计 ID 共用（常为同一运营主体）
+            trk = set(a.trackings or ()) & set(self.anchor["trackings"])
+            if trk and not (a.analytics and a.analytics in self.anchor["analytics"]):
+                ev.append("B|统计/像素ID一致:%s" % sorted(trk)[0])
+                B += 1
+            # 官方注册号：LEI（全球唯一+校验位）按 A，VAT/DUNS/CRN 按 B
+            regs = set(a.registry_ids or ()) & set(self.anchor["registry_ids"])
+            if regs:
+                lei = sorted(x for x in regs if x.startswith("lei:"))
+                if lei:
+                    ev.append("A|LEI一致:%s" % lei[0][4:])
+                    A += 1
+                else:
+                    ev.append("B|官方注册号一致:%s" % sorted(regs)[0])
+                    B += 1
             if a.favicon and a.favicon in self.anchor["favicon"]:
                 ev.append("B|favicon一致:%s" % a.favicon)
                 B += 1
@@ -3767,7 +4611,8 @@ class Engine(object):
 
             if "org" in pk:
                 # 公司名匹配是最容易误报的一类：仅当标题也含组织名才升 B，否则只算 C
-                if any(o and o in title for o in orgs):
+                if any(o and (o.lower() in title.lower()
+                              or _org_match(o, title)) for o in orgs):
                     ev.append("B|平台公司名+标题命中")
                     B += 1
                 else:
@@ -4028,6 +4873,12 @@ class Engine(object):
         weak_entities = set()
 
         def _ingest(text, allow_parent=False):
+            # 国际目标：从英文摘要提取 Ltd/LLC/GmbH/Inc 主体，且需与输入名相关
+            if any(_is_ascii_name(n) for n in names):
+                for e in extract_legal_entities_intl(text):
+                    if (any(_intl_entity_related(e, n) for n in names)
+                            and e not in entities):
+                        entities.append(e)
             for e in extract_legal_entities(text, brands or _OPERATOR_KEYS):
                 if allowed_prov_names:
                     if not any(p in e for p in allowed_prov_names):
@@ -4077,8 +4928,10 @@ class Engine(object):
         for e in entities[:4]:
             self.anchor["orgs"].add(e)
             log("搜索识别到关联主体: %s" % e, "+")
+            intl_e = _is_ascii_name(e) and _is_intl_query(e)
             cands_e = list(dict.fromkeys(
-                _operator_candidates(e) + _gov_candidates(e)))[:2]
+                (_intl_domain_candidates(e, 4) if intl_e else [])
+                + _operator_candidates(e) + _gov_candidates(e)))[:4 if intl_e else 2]
             for d in cands_e:
                 if not d or d in self.domains:
                     continue
@@ -4108,7 +4961,8 @@ class Engine(object):
                 self._code_candidates.add(c)
                 log("搜索识别到信用代码: %s（待自验证）" % c, "+")
         # 用法人主体全称/信用代码再搜一轮
-        extra_q = [e + " 官网" for e in entities[:2]] + codes[:1]
+        extra_q = [(e + (" official website" if _is_intl_query(e) else " 官网"))
+                   for e in entities[:2]] + codes[:1]
         for q in extra_q:
             for u in search_multi_urls(q):
                 _handle(q, u)
@@ -4589,7 +5443,8 @@ class Engine(object):
                 "favicon", "providers", "prov_kinds", "prov_beian", "prov_cert",
                 "prov_org", "source", "evidence", "reject_reason", "urls",
                 "plain", "findings", "emails", "phones", "authorities", "refs",
-                "site_code", "police_beian"]
+                "site_code", "police_beian", "rdap_org", "rdap_country",
+                "trackings", "registry_ids", "asn", "asn_org"]
 
         def write_csv(path, items):
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -4613,6 +5468,10 @@ class Engine(object):
                         ";".join(sorted(a.authorities)),
                         ";".join(sorted(a.refs)),
                         a.site_code, a.police_beian,
+                        a.rdap_org, a.rdap_country,
+                        ";".join(sorted(a.trackings)),
+                        ";".join(sorted(a.registry_ids)),
+                        a.asn, a.asn_org,
                     ])
 
         # 输出格式选择（--formats / 界面开关）：md / csv / json；未指定=全出
@@ -4749,6 +5608,17 @@ class Engine(object):
             L.append("- 锚点备案号：%s" % "、".join(sorted(self.anchor["beian"])))
         if self.anchor["analytics"]:
             L.append("- 锚点统计ID：%s" % "、".join(sorted(self.anchor["analytics"])))
+        if self.anchor["trackings"]:
+            L.append("- 锚点统计/像素ID：%s"
+                     % "、".join(sorted(self.anchor["trackings"])))
+        if self.anchor["registry_ids"]:
+            L.append("- 锚点官方注册号（LEI/VAT/DUNS 等）：%s"
+                     % "、".join(sorted(self.anchor["registry_ids"])))
+        if self.anchor["rdap_orgs"]:
+            L.append("- RDAP 注册人（与主体互证）：%s"
+                     % "、".join(sorted(self.anchor["rdap_orgs"])))
+        if self.anchor["asns"]:
+            L.append("- 目标自有 ASN：%s" % "、".join(sorted(self.anchor["asns"])))
         if self.anchor["favicon"]:
             L.append("- 锚点favicon：%s" % "、".join(sorted(self.anchor["favicon"])))
         if self.anchor["orgs"]:
@@ -5922,6 +6792,10 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
 
     eng = Engine(args)
     eng.names = names
+    eng.intl_mode = (any(_is_ascii_name(n) and not re.search(r"[一-龥]", n or "")
+                         for n in names)
+                     or any(not (root_domain(d) or "").endswith(".cn")
+                            for d in (domains or ())))
     eng.domains = domains
     eng.input_ips = ips
     intel_path = getattr(args, "intel", "") or ""
