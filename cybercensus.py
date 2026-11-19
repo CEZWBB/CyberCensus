@@ -278,6 +278,30 @@ OPERATOR_ROOT_DOMAINS = frozenset(
     r for roots in OPERATOR_ROOTS.values() for r in roots)
 
 
+def _province_codes(name):
+    """名称里的省份 → 两字母缩写列表（四川 → ["sc"]）。"""
+    for prov, codes in PROVINCE_CODES.items():
+        if prov in name:
+            return [c for c in codes if len(c) == 2]
+    return []
+
+
+def _gov_candidates(name):
+    """省级政府门户确定性候选（四川省人民政府 → www.sc.gov.cn）。
+
+    与运营商知识库同理：搜索被限流时政府类目标也会 0 结果。
+    只在名称明确含"政府"时生成，验证仍要求标题/证书与主体名互证。
+    市级政府暂无稳定拼音表，仍走搜索引擎。
+    """
+    if "政府" not in name:
+        return []
+    out = []
+    for pc in _province_codes(name):
+        out.append("www.%s.gov.cn" % pc)
+        out.append("%s.gov.cn" % pc)
+    return out
+
+
 def _operator_candidates(name):
     """按"省份缩写 + 运营商根域"生成省级候选（四川移动 → sc.10086.cn）。
 
@@ -2054,14 +2078,14 @@ class Engine(object):
                         cands += new
                         log("运营商补充搜索（%s 网上营业厅）: %s"
                             % (alias_q, ", ".join(d for d, _ in new)), "+")
-                # 运营商：域名知识库直接补省级候选（不依赖搜索引擎）
-                fixed = _operator_candidates(name)
+                # 运营商/省级政府：域名知识库直接补省级候选（不依赖搜索引擎）
+                fixed = _operator_candidates(name) + _gov_candidates(name)
                 if fixed:
                     have = {d for d, _ in cands}
                     add = [(d, 20) for d in fixed if d not in have]
                     if add:
                         cands = add + cands
-                        log("运营商省级候选（域名知识库）: %s"
+                        log("确定性省级候选（域名知识库）: %s"
                             % ", ".join(d for d, _ in add), "+")
                 # 名称含省份时优先带省份缩写/全拼标签的候选：
                 # "四川移动" 命中 wap.sc.10086.cn / dcp.sc.10086.cn，
@@ -2156,13 +2180,13 @@ class Engine(object):
                     "若结果不全，请改用全称重试（如\"中国移动通信集团四川有限公司\"）。" % name, "!")
             cands = discover_domains_from_search(name, max_candidates=12,
                                                  lookup=lookup)
-            fixed = _operator_candidates(name)
+            fixed = _operator_candidates(name) + _gov_candidates(name)
             if fixed:
                 have = {d for d, _ in cands}
                 add = [(d, 20) for d in fixed if d not in have]
                 if add:
                     cands = add + cands
-                    log("运营商省级候选（域名知识库）: %s"
+                    log("确定性省级候选（域名知识库）: %s"
                         % ", ".join(d for d, _ in add), "+")
             if not cands:
                 log("搜索引擎未找到 %s 的候选域名；建议手动补充域名输入。" % name, "!")

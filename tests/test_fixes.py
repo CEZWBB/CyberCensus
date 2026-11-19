@@ -1621,6 +1621,14 @@ class TestOperatorCandidates(unittest.TestCase):
                          ["wap.sc.10086.cn"])
 
 
+class TestGovCandidates(unittest.TestCase):
+    def test_province_gov_seed(self):
+        f = cybercensus._gov_candidates
+        self.assertEqual(f("四川省人民政府"), ["www.sc.gov.cn", "sc.gov.cn"])
+        self.assertEqual(f("四川省人民医院"), [])
+        self.assertEqual(f("某某市人民政府"), [])
+
+
 class TestGovCandidateGuard(unittest.TestCase):
     def test_skip_gov_for_telecom(self):
         f = cybercensus._gov_candidate_allowed
