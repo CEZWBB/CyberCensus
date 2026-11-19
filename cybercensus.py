@@ -302,27 +302,105 @@ def _gov_candidates(name):
     return out
 
 
+# 省份单字简称（川移/蜀移/粤移…）与常见城市简称（蓉移/穗移…）
+PROVINCE_CHARS = {
+    "京": "北京", "津": "天津", "沪": "上海", "渝": "重庆", "冀": "河北",
+    "晋": "山西", "蒙": "内蒙古", "辽": "辽宁", "吉": "吉林", "黑": "黑龙江",
+    "苏": "江苏", "浙": "浙江", "皖": "安徽", "闽": "福建", "赣": "江西",
+    "鲁": "山东", "豫": "河南", "鄂": "湖北", "湘": "湖南", "粤": "广东",
+    "桂": "广西", "琼": "海南", "川": "四川", "蜀": "四川", "黔": "贵州",
+    "贵": "贵州", "滇": "云南", "云": "云南", "藏": "西藏", "陕": "陕西",
+    "秦": "陕西", "甘": "甘肃", "陇": "甘肃", "青": "青海", "宁": "宁夏",
+    "新": "新疆",
+}
+CITY_CHARS = {
+    "蓉": "成都", "穗": "广州", "鹏": "深圳", "汉": "武汉", "杭": "杭州",
+    "宁": "南京", "镐": "西安", "渝": "重庆", "津": "天津", "沪": "上海",
+    "京": "北京",
+}
+CITY_TO_PROVINCE = {
+    "成都": "四川", "广州": "广东", "深圳": "广东", "武汉": "湖北",
+    "杭州": "浙江", "南京": "江苏", "西安": "陕西", "重庆": "重庆",
+    "天津": "天津", "上海": "上海", "北京": "北京",
+}
+BRAND_CHARS = {"移": "移动", "联": "联通", "电": "电信", "铁": "铁塔",
+               "广": "广电"}
+
+
+def _decode_region_brand(name):
+    """从名称（含缩写）解析出 (省份, 城市, 行业牌子)。
+
+    "川移" → ("四川", "", "移动")；"蓉移" → ("四川", "成都", "移动")；
+    "中国移动通信集团四川有限公司" → ("四川", "", "移动")。
+    """
+    name = name or ""
+    prov = next((p for p in PROVINCE_CODES if p in name), "")
+    city = next((c for ch, c in CITY_CHARS.items()
+                 if ch in name or c in name), "")
+    if not prov:
+        prov = next((p for ch, p in PROVINCE_CHARS.items()
+                     if ch in name), "")
+    if not prov and city:
+        prov = CITY_TO_PROVINCE.get(city, "")
+    brand = next((b for b in _OPERATOR_KEYS if b in name), "")
+    if not brand:
+        brand = next((b for ch, b in BRAND_CHARS.items()
+                      if ch in name), "")
+    return prov, city, brand
+
+
+def alias_variants(name):
+    """自动生成同一主体的常见缩写/展开写法（不依赖模型）。
+
+    四川移动 → 川移 / 川移动 / 移动四川
+    川移 → 四川移动 / 川移动 / 移动四川
+    这些只作为**搜索词**，搜索结果仍走原有候选与互证。
+    """
+    prov, city, brand = _decode_region_brand(name)
+    if not brand or not (prov or city):
+        return []
+    base = city or prov
+    full = base + brand
+    out = []
+    if full and full != name:
+        out.append(full)
+    short = ""
+    if city:
+        short = next((ch for ch, c in CITY_CHARS.items() if c == city), "")
+    if not short:
+        short = next((ch for ch, p in PROVINCE_CHARS.items()
+                      if p == prov), "")
+    if short:
+        out.append(short + brand[0])      # 川移 / 蓉移
+        out.append(short + brand)         # 川移动 / 蓉移动
+    if prov and prov + brand not in out and prov + brand != name:
+        out.append(prov + brand)          # 四川移动
+    out.append(brand + base)              # 移动四川
+    out.append("中" + brand[0] + base)    # 中移四川
+    seen, res = set(), []
+    for v in out:
+        if v and v != name and v not in seen:
+            seen.add(v)
+            res.append(v)
+    return res[:8]
+
+
 def _operator_candidates(name):
     """按"省份缩写 + 运营商根域"生成省级候选（四川移动 → sc.10086.cn）。
 
     搜索引擎被限流/降级时会完全漏掉运营商省级站点；这几个根域是公开
     已知的集团官网域名，生成后仍要经过标题/证书互证，不直接当锚点。
     """
-    prov_codes = []
-    for prov, codes in PROVINCE_CODES.items():
-        if prov in name:
-            prov_codes = [c for c in codes if len(c) == 2]
-            break
-    if not prov_codes:
+    prov, city, brand = _decode_region_brand(name)
+    if not brand or not prov:
         return []
+    prov_codes = [c for c in PROVINCE_CODES.get(prov, ()) if len(c) == 2]
     out = []
-    for kw, roots in OPERATOR_ROOTS.items():
-        if kw in name:
-            for root in roots:
-                for pc in prov_codes:
-                    # 省级运营商门户实际可访问的通常是 wap.<省>.<根域>
-                    # （wap.sc.10086.cn）；验证后会自动补上父域 sc.10086.cn
-                    out.append("wap.%s.%s" % (pc, root))
+    for root in OPERATOR_ROOTS.get(brand, ()):
+        for pc in prov_codes:
+            # 省级运营商门户实际可访问的通常是 wap.<省>.<根域>
+            # （wap.sc.10086.cn）；验证后会自动补上父域 sc.10086.cn
+            out.append("wap.%s.%s" % (pc, root))
     return out
 
 
@@ -336,6 +414,8 @@ def _region_alias_query(name):
     """
     prov = next((p for p in PROVINCE_CODES if p in name), "")
     if not prov:
+        prov = _decode_region_brand(name)[0]   # 川移 → 四川
+    if not prov:
         return ""
     for kw in _REGION_ALIAS_KEYS:
         if kw in name:
@@ -348,13 +428,16 @@ def _region_alias_query(name):
 
 
 def _host_region_hit(name, host):
-    """候选主机是否带名称里的省份缩写/全拼标签（四川移动 ↔ sc.10086.cn）。"""
+    """候选主机是否带名称里的省份缩写/全拼标签（四川移动/川移 ↔ sc.10086.cn）。"""
     host = (host or "").lower()
     labels = set(host.split("."))
-    for prov, codes in PROVINCE_CODES.items():
-        if prov not in name:
-            continue
-        for c in codes:
+    provs = {p for p in PROVINCE_CODES if p in name}
+    if not provs:
+        p = _decode_region_brand(name)[0]   # 川移 → 四川
+        if p:
+            provs = {p}
+    for prov in provs:
+        for c in PROVINCE_CODES.get(prov, ()):
             if (len(c) == 2 and c in labels) or (len(c) > 2 and c in host):
                 return True
     return False
@@ -397,26 +480,13 @@ def _gov_candidate_allowed(name, host):
 
 
 def _region_hit(name, host, page_text=""):
-    """名称里的省级地名与域名标签的拼音缩写互证（四川移动 ↔ sc.10086.cn）。
+    """名称里的省级地名与域名标签的拼音缩写互证（四川移动/川移 ↔ sc.10086.cn）。
 
     必须配合行业词核验（见 _sector_hit）：单独的地域命中会误伤——
     "四川移动" 会命中任何 sc.* 的四川站点（如 www.sc.gov.cn 省政府），
     所以要求名称剔除省份后的行业词（"移动"）同时出现在页面文本中。
     """
-    host = (host or "").lower()
-    labels = set(host.split("."))
-    region_ok = False
-    for prov, codes in PROVINCE_CODES.items():
-        if prov not in name:
-            continue
-        for c in codes:
-            # 两字母缩写只认"独立标签"（防 school 里的 sc）；全拼允许子串
-            if (len(c) == 2 and c in labels) or (len(c) > 2 and c in host):
-                region_ok = True
-                break
-        if region_ok:
-            break
-    if not region_ok:
+    if not _host_region_hit(name, host):
         return False
     return _sector_hit(name, page_text)
 
@@ -432,6 +502,9 @@ def _sector_hit(name, text):
     for kw in _REGION_ALIAS_KEYS:
         if kw in name:
             return kw in text
+    brand = _decode_region_brand(name)[2]   # 川移 → 移动
+    if brand:
+        return brand in text
     rest = name or ""
     for prov in PROVINCE_CODES:
         rest = rest.replace(prov, "")
@@ -1304,6 +1377,56 @@ def load_intel(path):
     return out
 
 
+def _base_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+ALIAS_CACHE_PATH = os.path.join(_base_dir(), "aliases.json")
+
+
+def load_alias_cache(path=None):
+    """长期理解缓存：{单位名: {"aliases": [...], "seeds": [...]}}。
+
+    intel.json 是"这一次"的理解结果，缓存让一次性结果沉淀下来，
+    下次扫描同一单位自动带上别名与已验证过的种子域，不必再准备 JSON。
+    兼容旧版纯列表格式。
+    """
+    path = path or ALIAS_CACHE_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            out = {}
+            for k, v in data.items():
+                aliases, seeds = [], []
+                if isinstance(v, list):
+                    aliases = v
+                elif isinstance(v, dict):
+                    aliases = v.get("aliases") or []
+                    seeds = v.get("seeds") or []
+                aliases = [str(x).strip() for x in aliases if str(x).strip()][:20]
+                seeds = [str(x).strip() for x in seeds if str(x).strip()][:20]
+                if aliases or seeds:
+                    out[str(k)] = {"aliases": aliases, "seeds": seeds}
+            return out
+    except Exception:
+        pass
+    return {}
+
+
+def save_alias_cache(cache, path=None):
+    path = path or ALIAS_CACHE_PATH
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        log("别名缓存保存失败(%s): %s" % (path, str(e)[:80]), "!")
+        return False
+
+
 def filter_candidate_roots(hosts, exclude_roots=()):
     """从页面/文章正文提取的域名中筛出候选根域名：滤垃圾域/三方设施/已知域。
 
@@ -2146,6 +2269,18 @@ class Engine(object):
                         cands += add_q
                         log("intel 查询补充（%s）: %s"
                             % (q, ", ".join(d for d, _ in add_q)), "+")
+                # 自动缩写变体（川移 / 蜀移 / 移动四川…）
+                for v in [x for x in alias_variants(name) if x != name][:2]:
+                    lk4 = search_engine_lookup(v)
+                    self._absorb_search_text(lk4[0])
+                    more4 = discover_domains_from_search(
+                        v, max_candidates=8, lookup=lk4)
+                    seen_v = {d for d, _ in cands}
+                    add_v = [(d, s) for d, s in more4 if d not in seen_v]
+                    if add_v:
+                        cands += add_v
+                        log("缩写变体搜索（%s）: %s"
+                            % (v, ", ".join(d for d, _ in add_v)), "+")
                 # 运营商/省级政府：域名知识库直接补省级候选（不依赖搜索引擎）
                 fixed = list(dict.fromkeys(
                     _operator_candidates(name) + _gov_candidates(name)
@@ -2249,6 +2384,12 @@ class Engine(object):
                 for a in (self.intel.get("aliases") or [])[:2]:
                     if a != name:
                         lookups.append(search_engine_lookup(a))
+            # 自动缩写变体（川移 / 蜀移 / 移动四川…），完全离线生成
+            variants = [v for v in alias_variants(name) if v != name][:2]
+            for v in variants:
+                lookups.append(search_engine_lookup(v))
+            if variants:
+                log("缩写变体搜索: %s" % ", ".join(variants))
             text = " ".join(t for t, _ in lookups)
             hosts = [h for _, hs in lookups for h in hs]
             lookup = (text, hosts)
@@ -4633,6 +4774,33 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
             log("外部理解结果: 别名 %d / 查询词 %d / 种子域 %d（仅作候选，仍需互证）"
                 % (len(eng.intel["aliases"]), len(eng.intel["queries"]),
                    len(eng.intel["seed_domains"])), "+")
+    # 别名缓存：历史 intel / 人工补充的别名沉淀下来，下次不必再准备 JSON
+    cache = load_alias_cache()
+    reused = 0
+    for n in names:
+        entry = cache.get(n) or {}
+        for a in entry.get("aliases", []):
+            if a not in eng.intel["aliases"]:
+                eng.intel["aliases"].append(a)
+                reused += 1
+        for s in entry.get("seeds", []):
+            if s not in eng.intel["seed_domains"]:
+                eng.intel["seed_domains"].append(s)
+                reused += 1
+    if reused:
+        log("理解缓存复用 %d 条（%s）" % (reused, ALIAS_CACHE_PATH), "+")
+    if names and (eng.intel["aliases"] or eng.intel["seed_domains"]):
+        for n in names:
+            bucket = cache.setdefault(n, {"aliases": [], "seeds": []})
+            for a in eng.intel["aliases"]:
+                if a not in bucket["aliases"]:
+                    bucket["aliases"].append(a)
+            for s in eng.intel["seed_domains"]:
+                if s not in bucket["seeds"]:
+                    bucket["seeds"].append(s)
+            bucket["aliases"] = bucket["aliases"][:20]
+            bucket["seeds"] = bucket["seeds"][:20]
+        save_alias_cache(cache)
     for b in [args.beian] if args.beian else []:
         eng.anchor["beian"].add(b)
     for n in names:

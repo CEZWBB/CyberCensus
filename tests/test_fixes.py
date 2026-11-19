@@ -1619,6 +1619,47 @@ class TestOperatorCandidates(unittest.TestCase):
         self.assertEqual(cybercensus._operator_candidates("东莞市人民医院"), [])
         self.assertEqual(cybercensus._operator_candidates("四川移动"),
                          ["wap.sc.10086.cn"])
+        # 缩写输入同样能推导出省级运营商入口
+        self.assertEqual(cybercensus._operator_candidates("川移"),
+                         ["wap.sc.10086.cn"])
+        self.assertTrue(cybercensus._host_region_hit("川移", "wap.sc.10086.cn"))
+        self.assertTrue(cybercensus._sector_hit("川移", "中国移动APP"))
+        self.assertTrue(cybercensus._region_hit(
+            "川移", "wap.sc.10086.cn", "中国移动APP"))
+
+
+class TestAliasVariants(unittest.TestCase):
+    def test_full_name_generates_short_forms(self):
+        v = cybercensus.alias_variants("中国移动通信集团四川有限公司")
+        self.assertIn("四川移动", v)
+        self.assertIn("川移", v)
+
+    def test_short_input_expands_to_full(self):
+        v = cybercensus.alias_variants("川移")
+        self.assertEqual(v[0], "四川移动")
+        self.assertIn("川移动", v)
+
+    def test_city_short_form(self):
+        v = cybercensus.alias_variants("蓉移")
+        self.assertIn("成都移动", v)
+
+    def test_unrelated_name_no_variants(self):
+        self.assertEqual(cybercensus.alias_variants("东莞市人民医院"), [])
+
+
+class TestAliasCache(unittest.TestCase):
+    def test_roundtrip_and_legacy(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "aliases.json")
+            cache = {"四川移动": {"aliases": ["川移"],
+                                 "seeds": ["wap.sc.10086.cn"]}}
+            self.assertTrue(cybercensus.save_alias_cache(cache, p))
+            self.assertEqual(cybercensus.load_alias_cache(p), cache)
+            # 旧版纯列表格式兼容
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"x": ["a"]}, f)
+            self.assertEqual(cybercensus.load_alias_cache(p),
+                             {"x": {"aliases": ["a"], "seeds": []}})
 
 
 class TestIntel(unittest.TestCase):

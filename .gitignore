@@ -1,6 +1,9 @@
 # 平台 Key 配置（含敏感凭据，绝不能上传）
 config.json
 
+# 本地理解缓存（运行期生成，含目标单位名）
+aliases.json
+
 # 运行产物
 cybercensus_out/
 tmp*/
