@@ -2238,6 +2238,29 @@ class TestProgressAndToolPaths(unittest.TestCase):
         cybercensus.progress(150, "c")
         self.assertEqual(got, [(0, "a"), (42, "b"), (100, "c")])
 
+    def test_wafw00f_command_uses_positional_url_and_stdout_json(self):
+        seen = {}
+
+        class R(object):
+            stdout = ('[{"detected": true, "firewall": "Cloudflare"}]')
+            returncode = 0
+
+        def fake_run(cmd, timeout):
+            seen["cmd"] = cmd
+            return R()
+
+        orig_path, orig_run = cybercensus.ext_path, cybercensus._run_ext
+        cybercensus.ext_path = lambda name: "wafw00f.exe"
+        cybercensus._run_ext = fake_run
+        self.addCleanup(cybercensus.__setattr__, "ext_path", orig_path)
+        self.addCleanup(cybercensus.__setattr__, "_run_ext", orig_run)
+        out = cybercensus.run_wafw00f("https://example.org")
+        self.assertEqual(out, "Cloudflare")
+        self.assertEqual(seen["cmd"][1], "https://example.org")
+        self.assertIn("-o", seen["cmd"])
+        self.assertIn("-", seen["cmd"])
+        self.assertNotIn("-u", seen["cmd"])
+
     @unittest.skipUnless(os.name == "nt", "Windows 路径查找")
     def test_ext_path_finds_bundled_tools(self):
         with tempfile.TemporaryDirectory() as d:

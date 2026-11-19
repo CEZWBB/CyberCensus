@@ -21,14 +21,45 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install customtkinter dnspython cryptography pypinyin pyinstaller
+          pip install customtkinter dnspython cryptography pypinyin pyinstaller wafw00f
 
       - name: Build single-file EXE
         run: |
           pyinstaller --onefile --windowed --name CyberCensus --collect-all customtkinter --collect-all pypinyin asm_gui.pyw
 
+      - name: Build standalone wafw00f
+        run: |
+          pyinstaller --onefile --name wafw00f --collect-all wafw00f packaging/wafw00f_entry.py
+
+      - name: Download enhanced engines (subfinder / httpx / nuclei)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $headers = @{ 'User-Agent' = 'CyberCensus-build' }
+          foreach ($repo in 'subfinder', 'httpx', 'nuclei') {
+            $r = Invoke-RestMethod "https://api.github.com/repos/projectdiscovery/$repo/releases/latest" -Headers $headers
+            $asset = $r.assets | Where-Object { $_.name -match 'windows_amd64\.zip$' } | Select-Object -First 1
+            if (-not $asset) { throw "No windows_amd64 asset for $repo" }
+            $zip = "$env:RUNNER_TEMP\$repo.zip"
+            Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+            Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\$repo" -Force
+            $exe = Get-ChildItem "$env:RUNNER_TEMP\$repo" -Recurse -Filter "$repo.exe" | Select-Object -First 1
+            Copy-Item $exe.FullName "dist/$repo.exe"
+          }
+
+      - name: Download nuclei templates
+        continue-on-error: true
+        run: |
+          dist\nuclei.exe -update-templates -duc
+
+      - name: Assemble portable package (exe + tools + templates)
+        run: |
+          python packaging/pack_release.py --skip-exe
+
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/CyberCensus.exe
+          files: |
+            dist/CyberCensus.exe
+            dist/CyberCensus-win64.zip
           generate_release_notes: true

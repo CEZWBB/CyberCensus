@@ -6217,6 +6217,11 @@ def ext_path(name):
         return p
     base = _base_dir()
     dirs = [base, os.path.join(base, "tools"), os.path.join(base, "bin")]
+    # PyInstaller 单文件模式：--add-binary 打包进去的工具解压在 _MEIPASS/tools
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        dirs += [os.path.join(meipass, "tools"),
+                 os.path.join(meipass, "bin")]
     exts = ["", ".exe", ".cmd", ".bat", ".ps1"] if os.name == "nt" else [""]
     for d in dirs:
         for ext in exts:
@@ -6318,7 +6323,9 @@ def run_wafw00f(url, timeout=120):
     if not binp:
         return ""
     try:
-        r = _run_ext([binp, "-u", url, "-f", "json"], timeout)
+        # wafw00f 的位置参数是 URL；JSON 必须用 -o -（stdout）+ -f json
+        r = _run_ext([binp, url, "-o", "-", "-f", "json", "--no-colors"],
+                     timeout)
         data = json.loads(r.stdout or "{}")
         items = data if isinstance(data, list) else [data]
         for it in items:
@@ -6342,6 +6349,10 @@ def run_nuclei(urls, timeout=1200, severity="critical,high,medium"):
             f.write("\n".join(urls))
         cmd = [binp, "-l", tmp, "-jsonl", "-silent", "-duc", "-severity", severity,
                "-timeout", "8", "-retries", "1"]
+        # 随发布包附带的官方模板（exe 同级 nuclei-templates/），避免首次运行还要联网下载
+        tpl = os.path.join(_base_dir(), "nuclei-templates")
+        if os.path.isdir(tpl):
+            cmd += ["-t", tpl]
         r = _run_ext(cmd, timeout)
         # nuclei v2 没有 -jsonl（v3 才有）：按输出自动回退到 -json
         if r.returncode != 0 and "flag provided but not defined" in (
