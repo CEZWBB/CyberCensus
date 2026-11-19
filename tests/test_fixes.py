@@ -1628,6 +1628,41 @@ class TestOperatorCandidates(unittest.TestCase):
             "川移", "wap.sc.10086.cn", "中国移动APP"))
 
 
+class TestContactEvidence(unittest.TestCase):
+    def test_extract_phones_and_authority(self):
+        html = ("<footer>联系电话：028-85551234 手机：13800138000 "
+                "客服：10086<br>主办单位：某某市人民医院</footer>")
+        phones = cybercensus._extract_phones(html)
+        self.assertIn("02885551234", phones)
+        self.assertIn("13800138000", phones)
+        self.assertNotIn("10086", phones)
+        self.assertIn("某某市人民医院", cybercensus._extract_authority(html))
+
+    def test_evaluate_contact_match_confirms(self):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.anchor["emails"] = {"office@x.com"}
+        e.anchor["phones"] = {"02885551234"}
+        e.anchor["orgs"] = {"某某市人民医院"}
+        a = e.add_asset("www.other.com", 80, "http", source="test")
+        a.emails = {"office@x.com"}
+        a.phones = {"02885551234"}
+        a.authorities = {"某某市人民医院"}
+        e.evaluate()
+        self.assertEqual(a.confidence, "确认")
+        self.assertTrue(any("邮箱" in x for x in a.evidence))
+        self.assertTrue(any("电话" in x for x in a.evidence))
+
+    def test_reciprocal_link_evidence(self):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.anchor["domains"] = {"main.com"}
+        a = e.add_asset("www.other.com", 80, "http", source="test")
+        a.refs = {"main.com"}
+        e.evaluate()
+        self.assertTrue(any("链接到目标主域" in x for x in a.evidence))
+
+
 class TestOperatorDomainVerify(unittest.TestCase):
     def test_district_site_verified_by_cert_brand(self):
         e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
@@ -1706,7 +1741,6 @@ class TestKeywordSearch(unittest.TestCase):
         e = cybercensus.Engine(argparse.Namespace(
             beian="", threads=10, timeout=5))
         e.names = ["双流移动"]
-        orig = cybercensus.search_result_urls
 
         def fake(q):
             if "site:" in q:
@@ -1714,11 +1748,9 @@ class TestKeywordSearch(unittest.TestCase):
             return ["https://sc.10086.cn/shuangliu/index.html",
                     "https://www.10086.cn/x",
                     "https://news.example.com/a"]
-        cybercensus.search_result_urls = fake
-        orig360 = cybercensus.search_360_urls
-        cybercensus.search_360_urls = lambda q: []
-        self.addCleanup(cybercensus.__setattr__, "search_result_urls", orig)
-        self.addCleanup(cybercensus.__setattr__, "search_360_urls", orig360)
+        orig_multi = cybercensus.search_multi_urls
+        cybercensus.search_multi_urls = lambda q, timeout=15: fake(q)
+        self.addCleanup(cybercensus.__setattr__, "search_multi_urls", orig_multi)
         e.collect_keyword_leads()
         # 省级运营商域成为弱锚点（只进疑似）；www 根域不整体纳入
         self.assertIn("sc.10086.cn", e.anchor["weak_domains"])
@@ -1732,14 +1764,11 @@ class TestKeywordSearch(unittest.TestCase):
         e = cybercensus.Engine(argparse.Namespace(
             beian="", threads=10, timeout=5))
         e.names = ["双流电信"]
-        orig = cybercensus.search_result_urls
-        orig360 = cybercensus.search_360_urls
-        cybercensus.search_result_urls = lambda q: []
-        cybercensus.search_360_urls = lambda q: [
+        orig_multi = cybercensus.search_multi_urls
+        cybercensus.search_multi_urls = lambda q, timeout=15: [
             "https://sc.189.cn/a", "https://sc.189.cn/b",
             "https://cloudmeeting.189.cn/x"]
-        self.addCleanup(cybercensus.__setattr__, "search_result_urls", orig)
-        self.addCleanup(cybercensus.__setattr__, "search_360_urls", orig360)
+        self.addCleanup(cybercensus.__setattr__, "search_multi_urls", orig_multi)
         e.collect_keyword_leads()
         self.assertIn("sc.189.cn", e.anchor["weak_domains"])
         self.assertNotIn("189.cn", e.anchor["domains"])

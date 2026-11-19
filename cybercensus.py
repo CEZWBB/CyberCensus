@@ -970,6 +970,45 @@ def _extract_emails(text, limit=8):
     return out
 
 
+PHONE_RE = re.compile(
+    r"(?<!\d)(0\d{2,3}[-\s]?\d{7,8}|1[3-9]\d{9}|400[-\s]?\d{3}[-\s]?\d{4})(?!\d)")
+_PHONE_JUNK = frozenset(("10086", "10010", "10000", "95588", "12345",
+                         "4001100000", "4001000000"))
+_AUTHORITY_RE = re.compile(
+    r"(?:版权所有|主办单位|承办单位|技术支持|Copyright)\s*[:：]?\s*"
+    r"([^\s<|，。;；]{3,60})", re.I)
+
+
+def _extract_phones(text, limit=8):
+    """页面联系电话（座机/手机/400），过滤运营商客服等公共号码。"""
+    out, seen = [], set()
+    plain = _strip_tags(text or "")
+    for m in PHONE_RE.finditer(plain):
+        p = re.sub(r"[\s-]", "", m.group(1))
+        if p in _PHONE_JUNK or len(p) < 7 or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _extract_authority(text, limit=3):
+    """页脚的主办单位 / 版权所有单位（无备案、无证书时的归属线索）。"""
+    plain = _strip_tags(text or "")
+    out = []
+    for m in _AUTHORITY_RE.finditer(plain):
+        v = m.group(1).strip(" 　:：-|")
+        v = re.split(r"(?:版权所有|技术支持|网站标识码|ICP备|公网安备)",
+                     v)[0].strip()
+        if 2 <= len(v) <= 40 and v not in out:
+            out.append(v)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _extract_scripts(body, base_url, limit=8):
     """从页面提取外部 JS 脚本绝对 URL（JSFinder/WebInfoHunter 的前置步骤）。"""
     out = []
@@ -1097,7 +1136,8 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     out = {"url": url, "status": "", "title": "", "server": "",
            "powered": "", "beian": "", "analytics": "", "favicon": "",
            "tech": "", "body_len": 0, "credit_code": "", "refs": [], "meta": "",
-           "emails": [], "scripts": [], "waf": ""}
+           "emails": [], "phones": [], "authorities": [],
+           "scripts": [], "waf": ""}
     body = ""
     status = ""
     hdrs = {}
@@ -1135,6 +1175,8 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     out["credit_code"] = extract_credit_code(body)   # 页脚常印统一社会信用代码
     out["meta"] = _extract_meta(body)                # SPA 站的单位名常在 meta 里
     out["emails"] = _extract_emails(body)            # 页面联系邮箱
+    out["phones"] = _extract_phones(body)            # 页面联系电话
+    out["authorities"] = _extract_authority(body)    # 页脚主办/版权单位
     out["scripts"] = _extract_scripts(body, url)     # 外部 JS（后续挖域名/密钥）
     out["waf"] = detect_waf(
         " ".join("%s:%s" % (k, v) for k, v in hdrs.items()), body)  # 防护设备识别
@@ -1678,6 +1720,93 @@ def search_360_urls(query, timeout=15):
     return urls
 
 
+def search_360_lookup(query, timeout=15):
+    """360 搜索返回 (去标签文本, 结果主机列表)，作为 Bing 的备用通道。"""
+    try:
+        url = "https://www.so.com/s?q=" + urllib.parse.quote(query)
+        html = http_get(url, timeout=timeout, retries=1,
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        hosts = []
+        for m in re.finditer(r"<h3[^>]*>.*?</h3>", html, re.S):
+            md = re.search(r'data-mdurl="([^"]+)"', m.group(0))
+            if not md:
+                continue
+            h = _url_host(md.group(1).replace("&amp;", "&"))
+            if h and h not in hosts:
+                hosts.append(h)
+        return _strip_tags(html), hosts
+    except Exception:
+        return "", []
+
+
+def _baidu_urls(query, timeout=15):
+    """百度结果 URL（能拿到 data-tools/mu 时）；遇到安全验证返回空。"""
+    urls = []
+    try:
+        url = ("https://www.baidu.com/s?wd=" + urllib.parse.quote(query)
+               + "&rn=20")
+        html = http_get(url, timeout=timeout, retries=1,
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        low = html.lower()
+        if "百度安全验证" in html or "wappass" in low or "verify" in low[:2000]:
+            return []
+        for m in re.finditer(r"""data-tools=['"](.+?)['"]""", html, re.S):
+            raw = m.group(1).replace("&quot;", '"').replace("&#39;", "'")
+            for u in re.findall(r'"url"\s*:\s*"(https?://[^"]+)"', raw):
+                u = u.replace("\\/", "/")
+                if u not in urls:
+                    urls.append(u)
+        for u in re.findall(r'\bmu="(https?://[^"]+)"', html):
+            if u not in urls:
+                urls.append(u)
+    except Exception:
+        pass
+    return urls[:20]
+
+
+def _sogou_urls(query, timeout=15):
+    """搜狗结果 URL（能解析出直链/站点域时）；验证码页面返回空。"""
+    urls = []
+    try:
+        url = "https://www.sogou.com/web?query=" + urllib.parse.quote(query)
+        html = http_get(url, timeout=timeout, retries=1,
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        low = html.lower()
+        if "antispider" in low or "请输入验证码" in html:
+            return []
+        for m in re.finditer(r"<h3[^>]*>.*?</h3>", html, re.S):
+            for u in re.findall(r'href="(https?://[^"]+)"', m.group(0)):
+                if "sogou.com" in u:
+                    continue
+                if u not in urls:
+                    urls.append(u)
+        for d in re.findall(r"<cite[^>]*>([^<]+)</cite>", html):
+            d = d.strip().split()[0].strip("/")
+            if "." in d and "/" not in d:
+                u = "http://" + d
+                if u not in urls:
+                    urls.append(u)
+    except Exception:
+        pass
+    return urls[:20]
+
+
+def search_multi_urls(query, timeout=15):
+    """多引擎内容检索：Bing + 360 + 百度 + 搜狗，失败自动跳过并去重。"""
+    out, seen = [], set()
+    for fn in (search_result_urls, search_360_urls, _baidu_urls,
+               _sogou_urls):
+        try:
+            urls = fn(query)
+        except Exception:
+            urls = []
+        for u in urls:
+            if u and u not in seen:
+                seen.add(u)
+                out.append(u)
+    return out
+
+
 def discover_domains_from_search(name, max_candidates=5, lookup=None):
     """从搜索引擎结果提取候选官网域名，返回 [(host, score), ...] 按分排序。
 
@@ -2127,7 +2256,8 @@ class Asset(object):
                  "powered", "tech", "cert_org", "cert_san", "beian",
                  "analytics", "favicon", "source", "evidence", "confidence",
                  "error", "prov_kinds", "providers", "prov_beian", "prov_cert",
-                 "prov_org", "reject_reason", "urls", "findings", "credit_code")
+                 "prov_org", "reject_reason", "urls", "findings", "credit_code",
+                 "emails", "phones", "authorities", "refs")
 
     def __init__(self, host, port=None, scheme=None):
         self.host = host
@@ -2157,6 +2287,10 @@ class Asset(object):
         self.urls = set()
         self.findings = set()     # 敏感路径发现 ["路径|说明", ...]
         self.credit_code = ""     # 页面含有的统一社会信用代码
+        self.emails = set()       # 页面联系邮箱（与锚点一致可作归属证据）
+        self.phones = set()       # 页面联系电话
+        self.authorities = set()  # 页脚主办/版权单位
+        self.refs = set()         # 页面引用的外部域名（互链证据）
 
     def key(self):
         p = self.port or (443 if self.scheme == "https" else 80 if self.scheme == "http" else "")
@@ -2174,7 +2308,8 @@ class Asset(object):
 
 def _merge_assets(dst, src):
     """字段级合并：集合字段取并集，标量字段空才填（src 的证据不覆盖 dst 已有值）。"""
-    for s in ("source", "providers", "prov_kinds", "urls", "findings"):
+    for s in ("source", "providers", "prov_kinds", "urls", "findings",
+              "emails", "phones", "authorities", "refs"):
         getattr(dst, s).update(getattr(src, s))
     for s in ("ip", "title", "server", "scheme", "status", "beian", "prov_beian",
               "prov_cert", "prov_org", "cert_org", "cert_san", "analytics",
@@ -2394,7 +2529,8 @@ class Engine(object):
         self.sub_map = {}         # host -> ip (被动得到)
         self.anchor = {"orgs": set(), "beian": set(), "analytics": set(),
                        "favicon": set(), "ips": set(), "domains": set(),
-                       "weak_domains": set(), "credit_codes": set()}
+                       "weak_domains": set(), "credit_codes": set(),
+                       "emails": set(), "phones": set(), "authorities": set()}
         self.ip_notes = {}        # ip -> info dict
         self.provider_records = []
         self.provider_stats = {}
@@ -2467,6 +2603,16 @@ class Engine(object):
                 self._absorb_search_text(lookup[0])
                 cands = discover_domains_from_search(name, max_candidates=5,
                                                      lookup=lookup)
+                if not cands:
+                    # Bing 被限流/无结果时改用 360 搜索
+                    lk360 = search_360_lookup(name)
+                    if lk360[0] or lk360[1]:
+                        self._absorb_search_text(lk360[0])
+                        cands = discover_domains_from_search(
+                            name, max_candidates=8, lookup=lk360)
+                        if cands:
+                            log("Bing 无候选，360 搜索补充: %s"
+                                % ", ".join(d for d, _ in cands), "+")
                 # 运营商：补一次"网上营业厅"查询，避免 Bing 只回政务门户导致
                 # 候选里没有 10086.cn 体系（四川移动 → wap.sc.10086.cn）
                 if any(k in name for k in _OPERATOR_KEYS):
@@ -2634,6 +2780,15 @@ class Engine(object):
                     "若结果不全，请改用全称重试（如\"中国移动通信集团四川有限公司\"）。" % name, "!")
             cands = discover_domains_from_search(name, max_candidates=12,
                                                  lookup=lookup)
+            if not cands:
+                lk360 = search_360_lookup(name)
+                if lk360[0] or lk360[1]:
+                    self._absorb_search_text(lk360[0])
+                    cands = discover_domains_from_search(
+                        name, max_candidates=12, lookup=lk360)
+                    if cands:
+                        log("Bing 无候选，360 搜索补充: %s"
+                            % ", ".join(d for d, _ in cands), "+")
             fixed = list(dict.fromkeys(
                 _operator_candidates(name) + _gov_candidates(name)
                 + _district_candidates(name)
@@ -2668,6 +2823,21 @@ class Engine(object):
             else:
                 log("候选域名均未通过验证（标题/证书与主体名不符），未加入锚点。", "!")
 
+    def _remember_asset(self, dom, info):
+        """把候选验证时的页面信息落到资产上，供 evaluate 做联系信息证据判定。"""
+        a = self.add_asset(dom, None, None, source="verify")
+        for k in ("title", "server", "beian", "credit_code"):
+            v = info.get(k)
+            if v and not getattr(a, k):
+                setattr(a, k, v)
+        if info.get("status") and not a.status:
+            a.status = str(info["status"])
+        a.emails.update(info.get("emails") or [])
+        a.phones.update(info.get("phones") or [])
+        a.authorities.update(info.get("authorities") or [])
+        a.refs.update(info.get("refs") or [])
+        return a
+
     def _verify_candidate_domain(self, name, dom):
         """探测候选域名首页，标题 / 证书 O= / 统一社会信用代码 任一互证即通过。
 
@@ -2694,11 +2864,34 @@ class Engine(object):
                 continue
             # 标题 + meta 描述一起验证（SPA 站标题常为空，单位名在 description 里）
             page_text = (info.get("title") or "") + " " + (info.get("meta") or "")
+            page_emails = set(info.get("emails") or [])
+            page_phones = set(info.get("phones") or [])
+            auths = info.get("authorities") or []
             if _hit(page_text):
+                self._remember_asset(dom, info)
+                self._add_verified_domain(dom)
+                return True
+            # 联系方式一致：无备案/无证书网站的最强替代证据
+            if ((page_emails & self.anchor["emails"])
+                    or (page_phones & self.anchor["phones"])):
+                self._remember_asset(dom, info)
+                self._add_verified_domain(dom)
+                return True
+            # 页脚主办/版权单位与主体名一致
+            if auths and any(
+                    any(o and (_org_match(o, x) or _org_match_fuzzy(o, x))
+                        for o in names) for x in auths):
+                self._remember_asset(dom, info)
+                self._add_verified_domain(dom)
+                return True
+            # 页面反向链接到目标主域（互链归属）
+            if set(info.get("refs") or []) & set(self.anchor["domains"]):
+                self._remember_asset(dom, info)
                 self._add_verified_domain(dom)
                 return True
             # 地域拼音互证 + 行业词核验：四川移动 ↔ sc.10086.cn（页面须含"移动"）
             if any(n and _region_hit(n, dom, page_text) for n in names):
+                self._remember_asset(dom, info)
                 self._add_verified_domain(dom)
                 return True
             # 页面含锚点信用代码：文档 7.2 的 A 级证据，直接确认
@@ -2796,6 +2989,14 @@ class Engine(object):
                 for ref in (info.get("refs") or []):
                     self._ref_candidates.append(ref)
                 self.contacts.update(info.get("emails") or [])
+                # 联系信息/页脚单位/互链：无备案网站的归属证据
+                a.emails.update(info.get("emails") or [])
+                a.phones.update(info.get("phones") or [])
+                a.authorities.update(info.get("authorities") or [])
+                a.refs.update(info.get("refs") or [])
+                self.anchor["emails"].update(a.emails)
+                self.anchor["phones"].update(a.phones)
+                self.anchor["authorities"].update(a.authorities)
                 self._js_urls.extend(info.get("scripts") or [])
                 self._apply_waf(a, info.get("waf", ""))
                 if a.analytics:
@@ -3189,6 +3390,10 @@ class Engine(object):
                 for ref in (info.get("refs") or []):
                     self._ref_candidates.append(ref)
                 self.contacts.update(info.get("emails") or [])
+                a.emails.update(info.get("emails") or [])
+                a.phones.update(info.get("phones") or [])
+                a.authorities.update(info.get("authorities") or [])
+                a.refs.update(info.get("refs") or [])
                 self._js_urls.extend(info.get("scripts") or [])
                 self._apply_waf(a, info.get("waf", ""))
                 if cert:
@@ -3427,6 +3632,23 @@ class Engine(object):
                 B += 1
             if a.favicon and a.favicon in self.anchor["favicon"]:
                 ev.append("B|favicon一致:%s" % a.favicon)
+                B += 1
+            # 无备案/无证书网站：联系方式、页脚单位、互链
+            if a.emails and (a.emails & self.anchor["emails"]):
+                ev.append("B|联系邮箱一致:%s" % sorted(a.emails & self.anchor["emails"])[0])
+                B += 1
+            if a.phones and (a.phones & self.anchor["phones"]):
+                ev.append("B|联系电话一致:%s" % sorted(a.phones & self.anchor["phones"])[0])
+                B += 1
+            if a.authorities:
+                for x in a.authorities:
+                    if any(o and (_org_match(o, x) or _org_match_fuzzy(o, x))
+                           for o in orgs):
+                        ev.append("B|页脚主办/版权单位一致:%s" % x[:40])
+                        B += 1
+                        break
+            if a.refs and (a.refs & set(self.anchor["domains"])):
+                ev.append("B|页面链接到目标主域")
                 B += 1
 
             # ---------- 域名归属 ----------
@@ -3668,13 +3890,12 @@ class Engine(object):
         queries = list(dict.fromkeys(queries))[:max_queries]
         if not queries:
             return
-        log("关键词线索检索（Bing + 360 内容检索，最多 %d 条查询）"
+        log("关键词线索检索（Bing/360/百度/搜狗 多引擎，最多 %d 条查询）"
             % len(queries))
         hits, added = 0, 0
         votes = {}
         for q in queries:
-            urls = list(dict.fromkeys(
-                search_result_urls(q) + search_360_urls(q)))
+            urls = search_multi_urls(q)
             for u in urls:
                 host = _url_host(u)
                 if not host:
@@ -4192,7 +4413,7 @@ class Engine(object):
                 "server", "tech", "cert_org", "cert_san", "beian", "analytics",
                 "favicon", "providers", "prov_kinds", "prov_beian", "prov_cert",
                 "prov_org", "source", "evidence", "reject_reason", "urls",
-                "plain", "findings"]
+                "plain", "findings", "emails", "phones", "authorities", "refs"]
 
         def write_csv(path, items):
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -4211,6 +4432,10 @@ class Engine(object):
                         ";".join(sorted(a.urls)),
                         plain_evidence(a.evidence),
                         ";".join(sorted(a.findings)),
+                        ";".join(sorted(a.emails)),
+                        ";".join(sorted(a.phones)),
+                        ";".join(sorted(a.authorities)),
+                        ";".join(sorted(a.refs)),
                     ])
 
         # 输出格式选择（--formats / 界面开关）：md / csv / json；未指定=全出
@@ -5286,6 +5511,10 @@ _PLAIN_EVIDENCE = (
     ("A|平台domain命中", "测绘平台按目标域名检索命中该站"),
     ("B|统计ID一致", "该站与目标单位官网使用同一个访问统计账号"),
     ("B|favicon一致", "该站网站图标与目标单位官网相同（同模板建站）"),
+    ("B|联系邮箱一致", "该站页面上的联系邮箱与目标单位官网一致"),
+    ("B|联系电话一致", "该站页面上的联系电话与目标单位官网一致"),
+    ("B|页脚主办/版权单位一致", "该站页脚的主办/版权单位与目标单位名称一致"),
+    ("B|页面链接到目标主域", "该站页面链接到目标单位主域名（互链）"),
     ("B|疑似归属弱锚点域名", "域名由组织名反查得到，归属待确认"),
     ("B|平台证书含组织名", "该站证书中包含目标单位组织名"),
     ("B|平台domain命中(弱锚点", "查询本身基于弱锚点域名，不重复计分"),
