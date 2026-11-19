@@ -4,7 +4,7 @@
 
 **解决什么问题**：政府、医院、学校、企业往往不清楚自己在互联网上开放了多少系统（官网、挂号系统、OA、测试环境……）。本工具从单位名称出发，聚合多平台数据源 + 本地被动采集，把"属于这家单位的公网资产"梳理成一份能直接交付的台账。
 
-- 接入 **FOFA、零零信安（0.zone）、鹰图（Hunter）、DayDayMap** 四个网络空间测绘平台（可选，**不配 Key 也能用**）
+- 接入 **FOFA、零零信安（0.zone）、鹰图（Hunter）、DayDayMap、ZoomEye（知道创宇）、360 Quake、Shodan、Censys** 八个网络空间测绘平台（可选，**不配 Key 也能用**）
 - 无 Key 时的本地底座：**搜索引擎官网自举**（找官网 → 标题/证书互证）→ crt.sh 子域名 → DNS / whois / IP 反查
 - 多平台结果**聚合、去重、交叉印证**
 - 报告自带**新手导读**和每条资产的**白话归属说明**（"该站备案号与目标单位一致"），不懂技术也能看懂哪些资产是哪家的
@@ -129,7 +129,7 @@ pyinstaller --onefile --windowed --collect-all customtkinter --collect-all pypin
 
 | 平台 | 能力 | 开关 |
 |------|------|------|
-| FOFA / 0.zone / Hunter 鹰图 / DayDayMap | 按 domain/cert/icp/org/ip/cidr 查询，结果并入台账 | `--providers`、`--no-providers` |
+| FOFA / 0.zone / Hunter / DayDayMap / ZoomEye / Quake / Shodan / Censys | 按 domain/cert/icp/org/ip/cidr/统计ID/图标查询，结果并入台账 | `--providers`、`--no-providers` |
 | 平台关键词检索 | title/body 精确搜短名（如"双流移动"），结果仅 C 级疑似 | `--provider-keyword`（默认关，耗配额） |
 | 平台图标/统计查询 | `icon_hash=`（favicon）、`body=`（GA/GTM/Meta 统计 ID），有 Key 时找同主体站点 | 自动（检测到锚点 favicon/统计 ID） |
 | 被动归属扩展 | 统计/像素 ID、Google/Bing/Facebook 验证令牌、证书 SAN 兄弟域、MX/SPF 域名反查 | 标准/复核模式自动；纯被动跳过 |
@@ -271,6 +271,11 @@ set FOFA_KEY=你的Key
 set ZONE_KEY=你的0.zone Key
 set HUNTER_KEY=你的鹰图Key
 set DAYDAYMAP_KEY=你的DayDayMap Key
+set ZOOMEYE_KEY=你的ZoomEye API Key
+set QUAKE_KEY=你的360 Quake Token
+set SHODAN_KEY=你的Shodan API Key
+set CENSYS_ID=你的Censys API ID
+set CENSYS_SECRET=你的Censys Secret
 ```
 
 **方式二：配置文件（长期）**
@@ -283,6 +288,10 @@ set DAYDAYMAP_KEY=你的DayDayMap Key
 | 零零信安 | `ZONE_KEY` | 0.zone 的 `zone_key_id` |
 | 鹰图 Hunter | `HUNTER_KEY` | api.hunter.how 的 api-key（鹰图与 Hunter 是同一平台） |
 | DayDayMap | `DAYDAYMAP_KEY` | 请求头 `api-key` |
+| ZoomEye（知道创宇） | `ZOOMEYE_KEY` | 请求头 `API-KEY` |
+| 360 Quake | `QUAKE_KEY` | 请求头 `X-QuakeToken` |
+| Shodan | `SHODAN_KEY` | `api.shodan.io` 查询参数 `key` |
+| Censys | `CENSYS_ID` + `CENSYS_SECRET` | HTTP Basic 认证（ID + Secret） |
 
 > 没配 Key 的平台会自动跳过，不影响其它平台和本地被动采集。
 
@@ -292,7 +301,7 @@ set DAYDAYMAP_KEY=你的DayDayMap Key
 python cybercensus.py -d xx.gov.cn --providers fofa hunter
 ```
 
-可选值：`fofa` / `zerozone` / `hunter` / `daydaymap`（可多次）。`--no-providers` 表示完全不查平台。
+可选值：`fofa` / `zerozone` / `hunter` / `daydaymap` / `zoomeye` / `quake` / `shodan` / `censys`（可多次）。`--no-providers` 表示完全不查平台。
 
 ---
 
@@ -354,7 +363,7 @@ run.bat -d xx.gov.cn
 
 | 参数 | 说明 |
 |------|------|
-| `--providers` | 只用指定平台：`fofa` / `zerozone` / `hunter` / `daydaymap`，可多次 |
+| `--providers` | 只用指定平台：`fofa` / `zerozone` / `hunter` / `daydaymap` / `zoomeye` / `quake` / `shodan` / `censys`，可多次 |
 | `--provider-pages` | 每个查询翻多少页，默认 1（越大越慢、越费配额） |
 | `--provider-limit` | 单个平台最多取多少条，默认 0=不限 |
 | `--no-providers` | 不调用任何测绘平台，只跑本地被动采集 |
@@ -434,8 +443,8 @@ run.bat -d xx.gov.cn
   │    · 备案号 / 统一社会信用代码反查；dork 风险线索；公众号文章；App Store APP
   │    · Wayback 历史 URL 路径（robots/sitemap/JS 之外的路径线索）
   │
-  ├─ 阶段2.5  多平台聚合（FOFA / 0.zone / Hunter / DayDayMap）
-  │    · 把锚点翻译成各平台的高精度查询（cert / domain / icp / org / ip）
+  ├─ 阶段2.5  多平台聚合（FOFA / 0.zone / Hunter / DayDayMap / ZoomEye / Quake / Shodan / Censys）
+  │    · 把锚点翻译成各平台的高精度查询（cert / domain / icp / org / ip / 统计ID / 图标）
   │    · 四平台并行取数，平台内部限速
   │    · 按 主机+端口 去重；同主机不同端口共享平台证据
   │

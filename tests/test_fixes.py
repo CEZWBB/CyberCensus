@@ -2232,6 +2232,100 @@ class TestIntlEntityExtraction(unittest.TestCase):
         self.assertEqual(len(out), 6)
 
 
+class TestExtraPlatforms(unittest.TestCase):
+    def test_availability(self):
+        cfg = {"zoomeye": {"key": "z"}, "quake": {"key": "q"},
+               "shodan": {"key": "s"},
+               "censys": {"id": "i", "secret": "s"}}
+        provs = prov.available_providers(cfg)
+        self.assertIn("zoomeye", provs)
+        self.assertIn("quake", provs)
+        self.assertIn("shodan", provs)
+        self.assertIn("censys", provs)
+
+    def test_aliases(self):
+        self.assertEqual(prov.ALIASES.get("知道创宇"), "zoomeye")
+        self.assertEqual(prov.ALIASES.get("360"), "quake")
+        self.assertEqual(prov.ALIASES.get("撒旦"), "shodan")
+
+    def test_translations(self):
+        self.assertEqual(prov.ZoomEye({"key": "k"}).translate(
+            prov.Query("domain", "a.com")), 'domain:"a.com"')
+        self.assertEqual(prov.ZoomEye({"key": "k"}).translate(
+            prov.Query("analytics", "G-ABC")), 'body:"G-ABC"')
+        self.assertEqual(prov.Quake({"key": "k"}).translate(
+            prov.Query("cidr", "1.2.3.0/24")), 'ip:"1.2.3.0/24"')
+        self.assertEqual(prov.Shodan({"key": "k"}).translate(
+            prov.Query("org", "Acme")), 'org:"Acme"')
+        self.assertEqual(prov.Shodan({"key": "k"}).translate(
+            prov.Query("icon", "123")), 'http.favicon.hash:123')
+
+    def test_zoomeye_parse(self):
+        payload = json.dumps({"matches": [{
+            "ip": ["203.0.113.5"], "site": "https://www.acme.com:443",
+            "title": "Acme", "domains": ["acme.com"],
+            "portinfo": {"port": 443, "server": "nginx"},
+        }]})
+        p = prov.ZoomEye({"key": "k"})
+        orig = prov._http
+        prov._http = lambda *a, **k: payload
+        self.addCleanup(prov.__setattr__, "_http", orig)
+        rows = p.search("domain:\"acme.com\"")
+        self.assertEqual(rows[0]["ip"], "203.0.113.5")
+        self.assertEqual(rows[0]["port"], 443)
+        self.assertEqual(rows[0]["host"], "https://www.acme.com:443")
+
+    def test_quake_parse(self):
+        payload = json.dumps({"code": 0, "data": [{
+            "ip": "203.0.113.6", "port": 8443,
+            "hostname": "vpn.acme.com",
+            "service": {"http": {"title": "VPN", "server": "nginx"}},
+        }]})
+        p = prov.Quake({"key": "k"})
+        orig = prov._http
+        prov._http = lambda *a, **k: payload
+        self.addCleanup(prov.__setattr__, "_http", orig)
+        rows = p.search("domain:\"acme.com\"")
+        self.assertEqual(rows[0]["host"], "vpn.acme.com")
+        self.assertEqual(rows[0]["title"], "VPN")
+
+    def test_censys_translate_and_parse(self):
+        p = prov.Censys({"id": "i", "secret": "s"})
+        self.assertEqual(p.translate(prov.Query("domain", "acme.com")),
+                         'host.names: "acme.com"')
+        payload = json.dumps({"code": 200, "result": {"hits": [{
+            "ip": "203.0.113.8", "name": "www.acme.com",
+            "services": [{"port": 443,
+                          "http": {"response": {"title": "Acme"}},
+                          "tls": {"certificates": {"leaf_data": {
+                              "subject": {"organization": ["Acme Inc"]},
+                              "names": ["acme.com"]}}}}],
+        }]}})
+        orig = prov._http
+        prov._http = lambda *a, **k: payload
+        self.addCleanup(prov.__setattr__, "_http", orig)
+        rows = p.search('host.names: "acme.com"')
+        self.assertEqual(rows[0]["host"], "www.acme.com")
+        self.assertEqual(rows[0]["port"], 443)
+        self.assertEqual(rows[0]["org"], "Acme Inc")
+
+    def test_shodan_parse(self):
+        payload = json.dumps({"matches": [{
+            "ip_str": "203.0.113.7", "port": 443,
+            "hostnames": ["mail.acme.com"], "org": "Acme",
+            "http": {"title": "Mail", "server": "nginx"},
+            "ssl": {"cert": {"subject": {"CN": "mail.acme.com"}}},
+        }]})
+        p = prov.Shodan({"key": "k"})
+        orig = prov._http
+        prov._http = lambda *a, **k: payload
+        self.addCleanup(prov.__setattr__, "_http", orig)
+        rows = p.search("hostname:\"acme.com\"")
+        self.assertEqual(rows[0]["host"], "mail.acme.com")
+        self.assertEqual(rows[0]["cert"], "mail.acme.com")
+        self.assertEqual(rows[0]["org"], "Acme")
+
+
 class TestProgressAndToolPaths(unittest.TestCase):
     def test_progress_hook_clamps(self):
         got = []

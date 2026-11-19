@@ -4,7 +4,11 @@
     "fofa": "https://fofa.info/userInfo",
     "zerozone": "https://0.zone/applyParticulars?type=site",
     "hunter": "https://hunter.how/search-api",
-    "daydaymap": "https://www.daydaymap.com/"
+    "daydaymap": "https://www.daydaymap.com/",
+    "zoomeye": "https://www.zoomeye.org/profile",
+    "quake": "https://quake.360.net/quake/#/personal",
+    "shodan": "https://account.shodan.io/",
+    "censys": "https://search.censys.io/account/api"
   },
   "fofa": {
     "email": "your@email.com",
@@ -18,5 +22,18 @@
   },
   "daydaymap": {
     "key": ""
+  },
+  "zoomeye": {
+    "key": ""
+  },
+  "quake": {
+    "key": ""
+  },
+  "shodan": {
+    "key": ""
+  },
+  "censys": {
+    "id": "",
+    "secret": ""
   }
 }

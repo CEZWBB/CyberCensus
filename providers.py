@@ -105,6 +105,11 @@ def load_config(path=None):
         ("zerozone", "key"): "ZONE_KEY",
         ("hunter", "key"): "HUNTER_KEY",
         ("daydaymap", "key"): "DAYDAYMAP_KEY",
+        ("zoomeye", "key"): "ZOOMEYE_KEY",
+        ("quake", "key"): "QUAKE_KEY",
+        ("shodan", "key"): "SHODAN_KEY",
+        ("censys", "id"): "CENSYS_ID",
+        ("censys", "secret"): "CENSYS_SECRET",
     }
     cfg = {
         "fofa": {"email": os.environ.get("FOFA_EMAIL", ""),
@@ -112,6 +117,11 @@ def load_config(path=None):
         "zerozone": {"key": os.environ.get("ZONE_KEY", "") or os.environ.get("OZONE_KEY", "")},
         "hunter": {"key": os.environ.get("HUNTER_KEY", "")},
         "daydaymap": {"key": os.environ.get("DAYDAYMAP_KEY", "") or os.environ.get("DDM_KEY", "")},
+        "zoomeye": {"key": os.environ.get("ZOOMEYE_KEY", "")},
+        "quake": {"key": os.environ.get("QUAKE_KEY", "")},
+        "shodan": {"key": os.environ.get("SHODAN_KEY", "")},
+        "censys": {"id": os.environ.get("CENSYS_ID", ""),
+                   "secret": os.environ.get("CENSYS_SECRET", "")},
     }
     if path and os.path.isfile(path):
         try:
@@ -138,6 +148,10 @@ ALIASES = {
     "零零信安": "zerozone", "zone": "zerozone",
     "hunter": "hunter", "鹰图": "hunter", "奇安信": "hunter",
     "daydaymap": "daydaymap", "ddm": "daydaymap",
+    "zoomeye": "zoomeye", "知道创宇": "zoomeye", "钟馗之眼": "zoomeye",
+    "quake": "quake", "360quake": "quake", "360": "quake", "quake360": "quake",
+    "shodan": "shodan", "撒旦": "shodan",
+    "censys": "censys",
 }
 
 
@@ -152,14 +166,27 @@ def available_providers(cfg, wanted=None):
                 want.add(ALIASES[w])
     out = {}
     # FOFA 认证需要 email + key 双参数，只配 key 时直接不启用，避免运行时每个查询都失败
-    if (not want or "fofa" in want) and cfg["fofa"].get("key") and cfg["fofa"].get("email"):
-        out["fofa"] = Fofa(cfg["fofa"])
-    if (not want or "zerozone" in want) and cfg["zerozone"].get("key"):
-        out["zerozone"] = ZeroZone(cfg["zerozone"])
-    if (not want or "hunter" in want) and cfg["hunter"].get("key"):
-        out["hunter"] = Hunter(cfg["hunter"])
-    if (not want or "daydaymap" in want) and cfg["daydaymap"].get("key"):
-        out["daydaymap"] = DayDayMap(cfg["daydaymap"])
+    def conf(name):
+        v = cfg.get(name) or {}
+        return v if isinstance(v, dict) else {}
+
+    if (not want or "fofa" in want) and conf("fofa").get("key") and conf("fofa").get("email"):
+        out["fofa"] = Fofa(conf("fofa"))
+    if (not want or "zerozone" in want) and conf("zerozone").get("key"):
+        out["zerozone"] = ZeroZone(conf("zerozone"))
+    if (not want or "hunter" in want) and conf("hunter").get("key"):
+        out["hunter"] = Hunter(conf("hunter"))
+    if (not want or "daydaymap" in want) and conf("daydaymap").get("key"):
+        out["daydaymap"] = DayDayMap(conf("daydaymap"))
+    if (not want or "zoomeye" in want) and conf("zoomeye").get("key"):
+        out["zoomeye"] = ZoomEye(conf("zoomeye"))
+    if (not want or "quake" in want) and conf("quake").get("key"):
+        out["quake"] = Quake(conf("quake"))
+    if (not want or "shodan" in want) and conf("shodan").get("key"):
+        out["shodan"] = Shodan(conf("shodan"))
+    if ((not want or "censys" in want) and conf("censys").get("id")
+            and conf("censys").get("secret")):
+        out["censys"] = Censys(conf("censys"))
     return out
 
 
@@ -597,6 +624,254 @@ class DayDayMap(BaseProvider):
 
 
 # ----------------------------------------------------------------------------
+# ZoomEye（知道创宇）
+# ----------------------------------------------------------------------------
+class ZoomEye(BaseProvider):
+    name = "zoomeye"
+    min_interval = 1.2
+    page_size = 100
+    max_pages = 5
+    supports = ("domain", "cert", "ip", "cidr", "keyword", "analytics")
+    ENDPOINT = "https://api.zoomeye.org/web/search"
+
+    def translate(self, q):
+        v = q.value.replace('"', '\\"')
+        if q.kind == "domain":
+            return 'domain:"%s"' % v
+        if q.kind == "cert":
+            return 'cert:"%s"' % v
+        if q.kind == "ip":
+            return 'ip:"%s"' % v
+        if q.kind == "cidr":
+            return 'cidr:"%s"' % v
+        if q.kind in ("keyword", "analytics"):
+            return 'body:"%s"' % v
+        return None
+
+    def search(self, native_query, page=1, size=None):
+        size = size or self.page_size
+        url = ("%s?query=%s&page=%d&pagesize=%d"
+               % (self.ENDPOINT, urllib.parse.quote(native_query),
+                  page, max(1, min(size, 10000))))
+        txt = _http(url, headers={"API-KEY": self.key}, timeout=35)
+        data = json.loads(txt)
+        rows = data.get("matches")
+        if rows is None:
+            d = data.get("data") or {}
+            rows = d.get("list") if isinstance(d, dict) else d
+        out = []
+        for m in rows or []:
+            if not isinstance(m, dict):
+                continue
+            ips = m.get("ip")
+            ip = (ips[0] if isinstance(ips, list) and ips else ips) or ""
+            pi = m.get("portinfo") or {}
+            domains = m.get("domains") or []
+            site = str(m.get("site") or (domains[0] if domains else "") or "")
+            cert = m.get("ssl") or m.get("cert") or ""
+            if isinstance(cert, dict):
+                c = cert.get("cert") or cert
+                cert = (c.get("subject") if isinstance(c, dict) else c) or ""
+            out.append({
+                "ip": str(ip), "port": pi.get("port") or m.get("port"),
+                "host": site, "url": site,
+                "title": m.get("title") or pi.get("title") or "",
+                "server": pi.get("server") or pi.get("product") or "",
+                "cert": cert,
+                "domain": site,
+            })
+        return out
+
+
+# ----------------------------------------------------------------------------
+# 360 Quake
+# ----------------------------------------------------------------------------
+class Quake(BaseProvider):
+    name = "quake"
+    min_interval = 1.2
+    page_size = 100
+    max_pages = 5
+    supports = ("domain", "cert", "ip", "cidr", "keyword", "analytics")
+    ENDPOINT = "https://quake.360.net/api/v3/search/quake_service"
+
+    def translate(self, q):
+        v = q.value.replace('"', '\\"')
+        if q.kind == "domain":
+            return 'domain:"%s"' % v
+        if q.kind == "cert":
+            return 'cert:"%s"' % v
+        if q.kind in ("ip", "cidr"):
+            return 'ip:"%s"' % v
+        if q.kind in ("keyword", "analytics"):
+            return 'body:"%s"' % v
+        return None
+
+    def search(self, native_query, page=1, size=None):
+        size = size or self.page_size
+        body = {"query": native_query,
+                "start": max(0, (page - 1) * size),
+                "size": max(1, min(size, 100))}
+        txt = _http(self.ENDPOINT, method="POST", body=body,
+                    headers={"X-QuakeToken": self.key,
+                             "Content-Type": "application/json"}, timeout=40)
+        data = json.loads(txt)
+        if str(data.get("code")) not in ("0", "200"):
+            raise RuntimeError("Quake: %s"
+                               % (data.get("message") or data.get("msg") or "error"))
+        rows = data.get("data")
+        if isinstance(rows, dict):
+            rows = rows.get("list") or rows.get("items") or []
+        out = []
+        for m in rows or []:
+            if not isinstance(m, dict):
+                continue
+            svc = m.get("service") or {}
+            http = svc.get("http") or {}
+            host = m.get("hostname") or m.get("domain") or m.get("ip") or ""
+            if isinstance(host, list):
+                host = host[0] if host else ""
+            out.append({
+                "ip": str(m.get("ip") or ""), "port": m.get("port"),
+                "host": host, "url": m.get("url") or "",
+                "title": http.get("title") or m.get("title") or "",
+                "server": http.get("server") or "",
+                "cert": m.get("cert") or svc.get("tls") or "",
+                "domain": host,
+            })
+        return out
+
+
+# ----------------------------------------------------------------------------
+# Shodan
+# ----------------------------------------------------------------------------
+class Shodan(BaseProvider):
+    name = "shodan"
+    min_interval = 1.1
+    page_size = 100
+    max_pages = 3
+    supports = ("domain", "cert", "ip", "cidr", "org", "keyword",
+                "analytics", "icon")
+    ENDPOINT = "https://api.shodan.io/shodan/host/search"
+
+    def translate(self, q):
+        v = q.value.replace('"', '\\"')
+        if q.kind == "domain":
+            return 'hostname:"%s"' % v
+        if q.kind == "cert":
+            return 'ssl:"%s"' % v
+        if q.kind == "ip":
+            return 'ip:"%s"' % v
+        if q.kind == "cidr":
+            return 'net:"%s"' % v
+        if q.kind == "org":
+            return 'org:"%s"' % v
+        if q.kind in ("keyword", "analytics"):
+            return 'http.html:"%s"' % v
+        if q.kind == "icon":
+            return 'http.favicon.hash:%s' % v
+        return None
+
+    def search(self, native_query, page=1, size=None):
+        url = ("%s?key=%s&query=%s&page=%d&minify=true"
+               % (self.ENDPOINT, urllib.parse.quote(self.key),
+                  urllib.parse.quote(native_query), page))
+        data = json.loads(_http(url, timeout=40))
+        out = []
+        for m in data.get("matches") or []:
+            if not isinstance(m, dict):
+                continue
+            host = ""
+            for key in ("hostnames", "domains"):
+                vals = m.get(key) or []
+                if vals:
+                    host = vals[0]
+                    break
+            if not host:
+                host = m.get("ip_str") or ""
+            http = m.get("http") or {}
+            ssl = (m.get("ssl") or {}).get("cert") or {}
+            subj = ssl.get("subject") or {}
+            cn = subj.get("CN") or subj.get("commonName") or ""
+            out.append({
+                "ip": m.get("ip_str") or "", "port": m.get("port"),
+                "host": host, "url": "",
+                "title": http.get("title") or "",
+                "server": http.get("server") or m.get("product") or "",
+                "cert": cn or ssl,
+                "org": m.get("org") or "",
+            })
+        return out
+
+
+# ----------------------------------------------------------------------------
+# Censys（全球证书/主机检索，ID + Secret）
+# ----------------------------------------------------------------------------
+class Censys(BaseProvider):
+    name = "censys"
+    min_interval = 1.2
+    page_size = 100
+    max_pages = 1
+    supports = ("domain", "cert", "org", "ip", "cidr", "keyword", "analytics")
+    ENDPOINT = "https://search.censys.io/api/v2/hosts/search"
+
+    def __init__(self, conf):
+        super(Censys, self).__init__(conf)
+        self.uid = (conf or {}).get("id", "")
+        self.secret = (conf or {}).get("secret", "")
+
+    def translate(self, q):
+        v = q.value.replace('"', '\\"')
+        if q.kind == "domain":
+            return 'host.names: "%s"' % v
+        if q.kind == "cert":
+            return 'services.tls.certificates.leaf_data.names: "%s"' % v
+        if q.kind == "org":
+            return 'services.tls.certificates.leaf_data.subject.organization: "%s"' % v
+        if q.kind in ("ip", "cidr"):
+            return 'ip: "%s"' % v
+        if q.kind in ("keyword", "analytics"):
+            return 'services.http.response.html: "%s"' % v
+        return None
+
+    def search(self, native_query, page=1, size=None):
+        size = size or self.page_size
+        auth = base64.b64encode(
+            ("%s:%s" % (self.uid, self.secret)).encode("utf-8")).decode("ascii")
+        url = ("%s?q=%s&per_page=%d"
+               % (self.ENDPOINT, urllib.parse.quote(native_query),
+                  max(1, min(size, 100))))
+        data = json.loads(_http(url, headers={"Authorization": "Basic " + auth},
+                                timeout=40))
+        if str(data.get("code")) not in ("200", "0"):
+            raise RuntimeError("Censys: %s" % (data.get("error") or "error"))
+        hits = ((data.get("result") or {}).get("hits") or [])
+        out = []
+        for h in hits:
+            if not isinstance(h, dict):
+                continue
+            svcs = h.get("services") or []
+            svc = svcs[0] if svcs else {}
+            http = (svc.get("http") or {}).get("response") or {}
+            names = h.get("names") or []
+            host = h.get("name") or (names[0] if names else "") or h.get("ip") or ""
+            tls = svc.get("tls") or {}
+            leaf = ((tls.get("certificates") or {}).get("leaf_data") or {})
+            subj = leaf.get("subject") or {}
+            org = subj.get("organization") or ""
+            if isinstance(org, list):
+                org = org[0] if org else ""
+            out.append({
+                "ip": h.get("ip") or "", "port": svc.get("port"),
+                "host": host, "url": "",
+                "title": http.get("title") or "",
+                "server": "",
+                "cert": leaf.get("names") or "",
+                "org": org,
+            })
+        return out
+
+
+# ----------------------------------------------------------------------------
 # 聚合入口
 # ----------------------------------------------------------------------------
 def run(providers, queries, pages=1, limit=0, debug=False, log=print):
@@ -634,7 +909,8 @@ def run(providers, queries, pages=1, limit=0, debug=False, log=print):
 # ----------------------------------------------------------------------------
 def _selftest():
     qs = build_queries(["example.com"], ["京ICP备12345678号"],
-                       ["某某市人民政府"], ["1.2.3.4"], ["1.2.3.0/24"])
+                       ["某某市人民政府"], ["1.2.3.4"], ["1.2.3.0/24"],
+                       analytics=["G-ABC123"], icon_hashes=["123456789"])
     print("统一查询计划:")
     for q in qs:
         print("  -", q)
@@ -644,6 +920,10 @@ def _selftest():
         "zerozone": {"key": "x"},
         "hunter": {"key": "x"},
         "daydaymap": {"key": "x"},
+        "zoomeye": {"key": "x"},
+        "quake": {"key": "x"},
+        "shodan": {"key": "x"},
+        "censys": {"id": "x", "secret": "y"},
     }
     provs = available_providers(dummy)
     for name, p in provs.items():

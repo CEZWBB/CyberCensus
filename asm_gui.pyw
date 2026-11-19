@@ -94,6 +94,10 @@ PLATFORM_LABELS = [
     ("zerozone", "0.zone 零零信安"),
     ("hunter", "鹰图 Hunter"),
     ("daydaymap", "DayDayMap"),
+    ("zoomeye", "ZoomEye 知道创宇"),
+    ("quake", "360 Quake"),
+    ("shodan", "Shodan"),
+    ("censys", "Censys"),
 ]
 
 # ---- 视觉系统：深空黑 + 青色霓虹（科技感） ----
@@ -1284,7 +1288,7 @@ class App(ctk.CTk):
     def _open_key_dialog(self):
         win = ctk.CTkToplevel(self)
         win.title("平台 API Key 配置（写入 config.json；环境变量优先于本文件）")
-        win.geometry("580x330")
+        win.geometry("580x560")
         win.resizable(False, False)
         win.after(300, lambda: win.grab_set())   # CTkToplevel 需等窗口显示后再 grab
 
@@ -1295,7 +1299,8 @@ class App(ctk.CTk):
                     data = json.load(fh)
             except Exception:
                 data = {}
-        for k in ("fofa", "zerozone", "hunter", "daydaymap"):
+        for k in ("fofa", "zerozone", "hunter", "daydaymap",
+                  "zoomeye", "quake", "shodan", "censys"):
             data.setdefault(k, {})
 
         fields = [
@@ -1304,6 +1309,11 @@ class App(ctk.CTk):
             ("0.zone Key", "zerozone", "key", True),
             ("鹰图 Hunter Key", "hunter", "key", True),
             ("DayDayMap Key", "daydaymap", "key", True),
+            ("ZoomEye Key", "zoomeye", "key", True),
+            ("360 Quake Token", "quake", "key", True),
+            ("Shodan Key", "shodan", "key", True),
+            ("Censys API ID", "censys", "id", False),
+            ("Censys Secret", "censys", "secret", True),
         ]
         entries = []
         for i, (label, sec, key, secret) in enumerate(fields):
