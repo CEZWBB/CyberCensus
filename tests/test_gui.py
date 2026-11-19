@@ -133,6 +133,11 @@ class TestBuildArgs(unittest.TestCase):
         args = gui.build_args("standard", [], webhook="https://hook.example/x")
         self.assertEqual(args.webhook, "https://hook.example/x")
 
+    def test_intel_passthrough(self):
+        args = gui.build_args("standard", [], intel="C:/x/intel.json")
+        self.assertEqual(args.intel, "C:/x/intel.json")
+        self.assertEqual(gui.build_args("standard", []).intel, "")
+
     def test_packages_passthrough(self):
         args = gui.build_args("standard", [], packages=["a.apk", "C:/pkgs"])
         self.assertEqual(args.app_packages, ["a.apk", "C:/pkgs"])

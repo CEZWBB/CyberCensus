@@ -1253,6 +1253,57 @@ PAGE_JUNK_ROOTS = SEARCH_JUNK_ROOTS | frozenset((
 ))
 
 
+def load_intel(path):
+    """读取外部模型/子 agent 产出的"理解结果" JSON。
+
+    约定：模型只提供**理解与查询计划**，不直接判定资产归属——
+    aliases 用于名称互证，queries 用于补充搜索，seed_domains 作为候选
+    域名（仍要经过标题/证书验证）。文件不存在/格式错误只告警不阻断。
+
+    示例：
+        {"aliases": ["四川移动", "川移"],
+         "queries": ["四川移动 网上营业厅", "四川移动 官网"],
+         "seed_domains": ["wap.sc.10086.cn"]}
+    """
+    out = {"aliases": [], "queries": [], "seed_domains": []}
+    if not path:
+        return out
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as e:
+        log("理解结果读取失败(%s): %s" % (path, str(e)[:80]), "!")
+        return out
+    if not isinstance(data, dict):
+        log("理解结果格式错误：顶层必须是 JSON 对象", "!")
+        return out
+
+    def _strs(key, cap, maxlen):
+        vals = []
+        for v in (data.get(key) or []):
+            if isinstance(v, str):
+                v = v.strip()
+                if v and len(v) <= maxlen and v not in vals:
+                    vals.append(v)
+            if len(vals) >= cap:
+                break
+        return vals
+
+    out["aliases"] = _strs("aliases", 10, 50)
+    out["queries"] = _strs("queries", 8, 80)
+    seeds = []
+    for s in (data.get("seed_domains") or []):
+        if not isinstance(s, str):
+            continue
+        h = (_url_host(s) or s.strip().lower()).strip(".")
+        if h and "." in h and h not in seeds:
+            seeds.append(h)
+        if len(seeds) >= 20:
+            break
+    out["seed_domains"] = seeds
+    return out
+
+
 def filter_candidate_roots(hosts, exclude_roots=()):
     """从页面/文章正文提取的域名中筛出候选根域名：滤垃圾域/三方设施/已知域。
 
@@ -2000,6 +2051,7 @@ class Engine(object):
         self._ref_candidates = [] # 页面外链/JS 引用的域名（待互证候选）
         self.apps = []            # 移动端 APP 资产 [(名称, 开发者, 包名, 归属依据), ...]
         self.packages = []        # APP/小程序包静态分析结果（本地包）
+        self.intel = {"aliases": [], "queries": [], "seed_domains": []}
         self.contacts = set()     # 页面/摘要提取的联系邮箱
         self._beian_candidates = set()  # 搜索摘要备案号候选（需自验证才升级）
         self._code_candidates = set()   # 搜索摘要信用代码候选（需自验证才升级）
@@ -2078,14 +2130,32 @@ class Engine(object):
                         cands += new
                         log("运营商补充搜索（%s 网上营业厅）: %s"
                             % (alias_q, ", ".join(d for d, _ in new)), "+")
+                # 外部模型/子 agent 的查询计划
+                iq = (self.intel.get("queries") or [])[:4]
+                if not iq:
+                    iq = [a for a in (self.intel.get("aliases") or [])[:2]
+                          if a != name]
+                for q in iq:
+                    lk3 = search_engine_lookup(q)
+                    self._absorb_search_text(lk3[0])
+                    more3 = discover_domains_from_search(
+                        q, max_candidates=8, lookup=lk3)
+                    seen_q = {d for d, _ in cands}
+                    add_q = [(d, s) for d, s in more3 if d not in seen_q]
+                    if add_q:
+                        cands += add_q
+                        log("intel 查询补充（%s）: %s"
+                            % (q, ", ".join(d for d, _ in add_q)), "+")
                 # 运营商/省级政府：域名知识库直接补省级候选（不依赖搜索引擎）
-                fixed = _operator_candidates(name) + _gov_candidates(name)
+                fixed = list(dict.fromkeys(
+                    _operator_candidates(name) + _gov_candidates(name)
+                    + list(self.intel.get("seed_domains") or [])))
                 if fixed:
                     have = {d for d, _ in cands}
                     add = [(d, 20) for d in fixed if d not in have]
                     if add:
                         cands = add + cands
-                        log("确定性省级候选（域名知识库）: %s"
+                        log("确定性/外部候选（域名知识库 + intel）: %s"
                             % ", ".join(d for d, _ in add), "+")
                 # 名称含省份时优先带省份缩写/全拼标签的候选：
                 # "四川移动" 命中 wap.sc.10086.cn / dcp.sc.10086.cn，
@@ -2171,6 +2241,14 @@ class Engine(object):
                 lookups.append(search_engine_lookup(alias_q + " 网上营业厅"))
             elif alias and alias != name:
                 lookups.append(search_engine_lookup(alias))
+            # 外部模型/子 agent 的查询计划（只用于搜索，不直接产生资产）
+            queries = (self.intel.get("queries") or [])[:6]
+            for q in queries:
+                lookups.append(search_engine_lookup(q))
+            if not queries:
+                for a in (self.intel.get("aliases") or [])[:2]:
+                    if a != name:
+                        lookups.append(search_engine_lookup(a))
             text = " ".join(t for t, _ in lookups)
             hosts = [h for _, hs in lookups for h in hs]
             lookup = (text, hosts)
@@ -2180,13 +2258,15 @@ class Engine(object):
                     "若结果不全，请改用全称重试（如\"中国移动通信集团四川有限公司\"）。" % name, "!")
             cands = discover_domains_from_search(name, max_candidates=12,
                                                  lookup=lookup)
-            fixed = _operator_candidates(name) + _gov_candidates(name)
+            fixed = list(dict.fromkeys(
+                _operator_candidates(name) + _gov_candidates(name)
+                + list(self.intel.get("seed_domains") or [])))
             if fixed:
                 have = {d for d, _ in cands}
                 add = [(d, 20) for d in fixed if d not in have]
                 if add:
                     cands = add + cands
-                    log("确定性省级候选（域名知识库）: %s"
+                    log("确定性/外部候选（域名知识库 + intel）: %s"
                         % ", ".join(d for d, _ in add), "+")
             if not cands:
                 log("搜索引擎未找到 %s 的候选域名；建议手动补充域名输入。" % name, "!")
@@ -2219,7 +2299,8 @@ class Engine(object):
         简称能匹配到"中国移动通信集团四川有限公司"，避免简称场景整体失效。
         """
         anchor_codes = set(self.anchor.get("credit_codes") or ())
-        names = set(self.names) | set(self.anchor.get("orgs") or ())
+        names = (set(self.names) | set(self.anchor.get("orgs") or ())
+                 | set(self.intel.get("aliases") or ()))
 
         def _hit(text):
             return any(n and (_org_match(n, text) or _org_match_fuzzy(n, text))
@@ -3192,7 +3273,8 @@ class Engine(object):
         """
         if not self.names:
             return
-        names = set(self.names) | set(self.anchor.get("orgs") or ())
+        names = (set(self.names) | set(self.anchor.get("orgs") or ())
+                 | set(self.intel.get("aliases") or ()))
         seen = set()
         for name in self.names:
             for app in itunes_search_apps(name):
@@ -3534,6 +3616,7 @@ class Engine(object):
                 "counts": {k: len(v) for k, v in groups.items()},
                 "apps": self.apps,
                 "packages": self.packages,
+                "intel": self.intel,
                 "ext_tools": sorted(self.ext_used),
                 "ext_detected": sorted(self.ext_detected),
                 "ext_hits": self.ext_hits,
@@ -3605,6 +3688,11 @@ class Engine(object):
             L.append("- 锚点favicon：%s" % "、".join(sorted(self.anchor["favicon"])))
         if self.anchor["orgs"]:
             L.append("- 关联组织名：%s" % "、".join(sorted(o for o in self.anchor["orgs"] if o)))
+        if any(self.intel.values()):
+            L.append("- 外部理解（intel）：别名 %s；查询词 %s；候选域 %s"
+                     % ("、".join(self.intel.get("aliases") or []) or "—",
+                        "、".join(self.intel.get("queries") or []) or "—",
+                        "、".join(self.intel.get("seed_domains") or []) or "—"))
         L.append("")
 
         # 平台统计
@@ -4482,6 +4570,8 @@ def build_parser():
                    help="本机 APK 文件或目录（可多次）：静态提取硬编码后台域名/URL，不联网")
     p.add_argument("--wxapkg", action="append", default=[], dest="app_packages",
                    help="本机微信小程序包（.wxapkg）文件或目录（可多次），同上")
+    p.add_argument("--intel", default="",
+                   help="外部模型/子 agent 产出的理解结果 JSON（别名/查询词/候选域名；仍走互证）")
     p.add_argument("--no-hints", action="store_true",
                    help="不做搜索引擎 dork 风险情报（默认开启）")
     p.add_argument("--sensitive", action="store_true",
@@ -4536,6 +4626,13 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
     eng.names = names
     eng.domains = domains
     eng.input_ips = ips
+    intel_path = getattr(args, "intel", "") or ""
+    if intel_path:
+        eng.intel = load_intel(intel_path)
+        if any(eng.intel.values()):
+            log("外部理解结果: 别名 %d / 查询词 %d / 种子域 %d（仅作候选，仍需互证）"
+                % (len(eng.intel["aliases"]), len(eng.intel["queries"]),
+                   len(eng.intel["seed_domains"])), "+")
     for b in [args.beian] if args.beian else []:
         eng.anchor["beian"].add(b)
     for n in names:

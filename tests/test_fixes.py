@@ -1621,6 +1621,33 @@ class TestOperatorCandidates(unittest.TestCase):
                          ["wap.sc.10086.cn"])
 
 
+class TestIntel(unittest.TestCase):
+    def test_load_intel_sanitizes(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "intel.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({
+                    "aliases": [" 四川移动 ", "川移", 123, ""],
+                    "queries": ["四川移动 网上营业厅", "x" * 200],
+                    "seed_domains": ["wap.sc.10086.cn",
+                                     "https://api.x.com/a", "not-a-domain", 5],
+                }, f, ensure_ascii=False)
+            r = cybercensus.load_intel(p)
+            self.assertEqual(r["aliases"], ["四川移动", "川移"])
+            self.assertEqual(r["queries"], ["四川移动 网上营业厅"])
+            self.assertEqual(r["seed_domains"], ["wap.sc.10086.cn", "api.x.com"])
+
+    def test_missing_or_bad_file(self):
+        empty = {"aliases": [], "queries": [], "seed_domains": []}
+        self.assertEqual(cybercensus.load_intel("Z:/definitely/nope.json"), empty)
+        self.assertEqual(cybercensus.load_intel(""), empty)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "bad.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("[1,2,3]")
+            self.assertEqual(cybercensus.load_intel(p), empty)
+
+
 class TestGovCandidates(unittest.TestCase):
     def test_province_gov_seed(self):
         f = cybercensus._gov_candidates

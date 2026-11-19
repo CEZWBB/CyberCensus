@@ -147,7 +147,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
                formats=None, sensitive=None, probe_interval=0.0, webhook="",
-               ext=True, packages=None):
+               ext=True, packages=None, intel=""):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
@@ -192,6 +192,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         no_ext=not bool(ext),
         ext_sub_limit=3000,
         app_packages=list(packages or []),
+        intel=intel or "",
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
@@ -629,7 +630,7 @@ class App(ctk.CTk):
     def _build_advanced_dialog(self):
         win = ctk.CTkToplevel(self)
         win.title("高级参数 · CyberCensus")
-        win.geometry("800x390")
+        win.geometry("800x450")
         win.configure(fg_color=BG)
         win.withdraw()
         win.protocol("WM_DELETE_WINDOW", win.withdraw)
@@ -706,6 +707,15 @@ class App(ctk.CTk):
                       ).grid(row=5, column=4, sticky="w")
         ctk.CTkButton(f, text="目录…", width=64, command=self._pick_package_dir
                       ).grid(row=5, column=5, sticky="w", padx=(6, 14))
+
+        ctk.CTkLabel(f, text="理解结果JSON").grid(row=6, column=0, sticky="e",
+                                                  padx=(14, 4), pady=6)
+        self.var_intel = ctk.StringVar(value="")
+        ctk.CTkEntry(f, textvariable=self.var_intel,
+                     placeholder_text="外部模型/子 agent 产出的 intel.json（别名/查询词/候选域）"
+                     ).grid(row=6, column=1, columnspan=4, sticky="we", padx=(0, 4))
+        ctk.CTkButton(f, text="文件…", width=64, command=self._pick_intel
+                      ).grid(row=6, column=5, sticky="w", padx=(6, 14))
 
         ctk.CTkLabel(win, text="提示：平台翻页越多越慢、越费配额；全端口扫描建议仅在授权窗口期使用。",
                      font=self.f_mono_sm, text_color=GRAY
@@ -857,6 +867,13 @@ class App(ctk.CTk):
             cur = self.var_packages.get().strip()
             self.var_packages.set((cur + ";" if cur else "") + d)
 
+    def _pick_intel(self):
+        p = filedialog.askopenfilename(
+            title="选择外部模型/子 agent 产出的理解结果 JSON",
+            filetypes=[("JSON", "*.json"), ("所有文件", "*.*")])
+        if p:
+            self.var_intel.set(p)
+
     # ---- Key 配置对话框 ----
     def _open_key_dialog(self):
         win = ctk.CTkToplevel(self)
@@ -960,6 +977,7 @@ class App(ctk.CTk):
             webhook=self.var_webhook.get().strip(),
             ext=self.var_ext.get(),
             packages=packages,
+            intel=self.var_intel.get().strip(),
         )
         self._last_out_dir = args.out
 
