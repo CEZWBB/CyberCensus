@@ -4105,8 +4105,10 @@ class Engine(object):
                     self.ip_notes[ip]["prefixes"].append(pf)
 
         # Whois + RDAP（RDAP 是国外域名的主通道；whois 隐私保护时自动补位）
-        progress(44, "Whois / RDAP 注册人")
-        for d in list(self.domains):
+        whois_domains = list(self.domains)
+        for _wi, d in enumerate(whois_domains):
+            progress(43 + int(2 * _wi / max(1, len(whois_domains))),
+                     "Whois / RDAP %d/%d" % (_wi + 1, len(whois_domains)))
             w = parse_whois(whois_query(d))
             org = w.get("org") or ""
             private = any(m in org for m in PRIVACY_ORG_MARKERS)
@@ -4205,11 +4207,17 @@ class Engine(object):
         pairs = [(ip, p) for ip in sorted(ips) for p in ports]
         opened_map = {}
         cap = max(8, self.args.threads * 2)
+        total_pairs = max(1, len(pairs))
+        done_pairs = 0
         with ThreadPoolExecutor(max_workers=min(len(pairs) or 1, cap)) as ex:
             futs = {ex.submit(tcp_open, ip, p, scan_timeout): (ip, p)
                     for ip, p in pairs}
             for f in as_completed(futs):
                 ip, p = futs[f]
+                done_pairs += 1
+                if done_pairs == total_pairs or done_pairs % max(1, total_pairs // 20) == 0:
+                    progress(71 + int(6 * done_pairs / total_pairs),
+                             "端口扫描 %d/%d" % (done_pairs, total_pairs))
                 try:
                     if f.result():
                         opened_map.setdefault(ip, []).append(p)
@@ -4269,9 +4277,15 @@ class Engine(object):
                     break
             return a, best, cert
 
+        total_t = max(1, len(targets))
+        done_t = 0
         with ThreadPoolExecutor(max_workers=max(1, self.args.threads)) as ex:
             futs = [ex.submit(_probe, a) for a in targets]
             for f in as_completed(futs):
+                done_t += 1
+                if done_t == total_t or done_t % max(1, total_t // 20) == 0:
+                    progress(78 + int(4 * done_t / total_t),
+                             "Web 探测 %d/%d" % (done_t, total_t))
                 try:
                     a, best, cert = f.result()
                 except Exception:
@@ -4882,7 +4896,9 @@ class Engine(object):
                     continue
                 votes[(root, pc)] = votes.get((root, pc), 0) + 1
 
-        for q in queries:
+        for _i, q in enumerate(queries):
+            progress(18 + int(6 * _i / max(1, len(queries))),
+                     "内容检索 %d/%d" % (_i + 1, len(queries)))
             for u in search_multi_urls(q):
                 _handle(q, u)
 
@@ -5149,7 +5165,10 @@ class Engine(object):
             self.ext_used["subfinder"] = tools["subfinder"]
             total = 0
             limit = int(getattr(self.args, "ext_sub_limit", 3000) or 0)
-            for d in [x for x in sorted(self.domains) if x][:10]:
+            sf_domains = [x for x in sorted(self.domains) if x][:10]
+            for _si, d in enumerate(sf_domains):
+                progress(62 + int(3 * _si / max(1, len(sf_domains))),
+                         "subfinder %d/%d" % (_si + 1, len(sf_domains)))
                 subs = sorted(run_subfinder(d))
                 if limit and len(subs) > limit:
                     log("  subfinder %s: %d 条，超过单域上限 %d，按字母序截断"
@@ -5165,6 +5184,7 @@ class Engine(object):
         httpx_results = []
         # 2) httpx：批量存活探测 + 标题/技术栈/服务器（仅部分端口，避免不必要的触碰）
         if "httpx" in tools and not no_probe:
+            progress(65, "httpx 存活探测")
             self.ext_used["httpx"] = tools["httpx"]
             hosts = []
             for a in self.assets.values():
@@ -5201,6 +5221,7 @@ class Engine(object):
 
         # 3) wafw00f：WAF 精确识别（对少量 Web 入口）
         if "wafw00f" in tools and not no_probe:
+            progress(67, "wafw00f WAF 识别")
             urls = [r["url"] for r in httpx_results if r.get("url")][:10]
             if not urls:
                 for a in self.assets.values():
@@ -5235,6 +5256,7 @@ class Engine(object):
                         if len(urls) >= 15:
                             break
                 self.ext_used["nuclei"] = tools["nuclei"]
+                progress(68, "nuclei 模板验证（可能较慢）")
                 hits = run_nuclei(urls)
                 self.ext_hits = hits
                 if hits:
@@ -5344,7 +5366,9 @@ class Engine(object):
         if not web:
             return
         log("路径线索采集: robots.txt / sitemap.xml（%d 个 Web 资产）" % len(web))
-        for a in web:
+        for _pi, a in enumerate(web):
+            progress(90 + int(2 * _pi / max(1, len(web))),
+                     "路径线索 %d/%d" % (_pi + 1, len(web)))
             base = self._asset_base_url(a)
             if not base:
                 continue

@@ -22,10 +22,14 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
-PKG = os.path.join(DIST, "CyberCensus-win64")
+# 在临时暂存目录组装，避免用户正开着上一版 CyberCensus.exe 时文件被锁、
+# 导致无法删除/覆盖发布目录。
+STAGE = os.path.join(DIST, "_pkg_stage_%d" % os.getpid())
+PKG = os.path.join(STAGE, "CyberCensus-win64")
 TOOLS = os.path.join(PKG, "tools")
 
 TOOL_NAMES = ("subfinder", "httpx", "wafw00f", "nuclei")
@@ -54,7 +58,15 @@ def _copy_tools():
             missing.append(name)
             continue
         dst = os.path.join(TOOLS, name + ".exe")
-        shutil.copy2(src, dst)
+        # 杀软会对刚复制的大 exe 短暂加锁，重试几次
+        for attempt in range(6):
+            try:
+                shutil.copy2(src, dst)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(1.0)
         print("  + %-12s %s (%.1f MB)"
               % (name, os.path.basename(src), os.path.getsize(dst) / 1048576.0))
     if missing:
@@ -110,8 +122,6 @@ def main():
         raise SystemExit("找不到 %s，请先构建 exe" % exe)
 
     print("== 组装发布目录 ==")
-    if os.path.isdir(PKG):
-        shutil.rmtree(PKG)
     os.makedirs(PKG)
     shutil.copy2(exe, os.path.join(PKG, "CyberCensus.exe"))
     print("  + CyberCensus.exe (%.1f MB)" % (os.path.getsize(exe) / 1048576.0))
@@ -125,8 +135,16 @@ def main():
     zip_path = zip_base + ".zip"
     if os.path.isfile(zip_path):
         os.remove(zip_path)
-    shutil.make_archive(zip_base, "zip", DIST, "CyberCensus-win64")
+    for attempt in range(5):
+        try:
+            shutil.make_archive(zip_base, "zip", STAGE, "CyberCensus-win64")
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(1.5)
     size = os.path.getsize(zip_path) / 1048576.0
+    shutil.rmtree(STAGE, ignore_errors=True)
     print("完成：%s (%.1f MB)" % (zip_path, size))
     print("解压后双击 CyberCensus.exe 即可使用，无需安装依赖。")
 

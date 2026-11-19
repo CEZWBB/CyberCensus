@@ -275,6 +275,10 @@ class App(ctk.CTk):
         self._last_engine = None
         self._scan_start = 0.0
         self._eta = None
+        self._prog_samples = []      # [(time, pct), ...] 用于按最近速率估算
+        self._eta_samples = []       # 最近的原始 ETA，取中位数抗抖动
+        self._last_prog_time = 0.0
+        self._prog_stage = ""
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -288,6 +292,7 @@ class App(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Control-Return>", lambda e: self._on_start())
         self.after(100, self._poll)
+        self.after(2000, self._tick_eta)
 
     # ------------------------------------------------------------------
     # 品牌头栏（横贯顶部）
@@ -680,7 +685,7 @@ class App(ctk.CTk):
         self.bar.set(0)
         self.bar.pack(side="left", fill="x", expand=True, padx=(18, 0))
         self.lbl_progress = ctk.CTkLabel(
-            frm_run, text="0% · 待开始", width=148, anchor="w",
+            frm_run, text="0% · 待开始", width=300, anchor="w",
             font=self.f_mono_sm, text_color=GRAY)
         self.lbl_progress.pack(side="left", padx=(10, 0))
 
@@ -696,9 +701,21 @@ class App(ctk.CTk):
         frm_cards.pack(fill="x", pady=(8, 4))
         for c in range(3):
             frm_cards.grid_columnconfigure(c, weight=1)
-        self.card_confirmed = self._card(frm_cards, 0, "确认资产", GREEN, "A ≥ 1 或 B ≥ 2")
-        self.card_suspect = self._card(frm_cards, 1, "疑似资产", ORANGE, "B = 1 或 C ≥ 1")
-        self.card_rejected = self._card(frm_cards, 2, "剔除（存疑）", GRAY, "无关联证据")
+        self.card_confirmed, self.frame_confirmed = self._card(
+            frm_cards, 0, "确认资产", GREEN, "A ≥ 1 或 B ≥ 2 · 点击筛选")
+        self.card_suspect, self.frame_suspect = self._card(
+            frm_cards, 1, "疑似资产", ORANGE, "B = 1 或 C ≥ 1 · 点击筛选")
+        self.card_rejected, self.frame_rejected = self._card(
+            frm_cards, 2, "剔除（存疑）", GRAY, "无关联证据 · 点击筛选")
+        self._card_frames = {
+            "确认": (self.frame_confirmed, GREEN),
+            "疑似": (self.frame_suspect, ORANGE),
+            "存疑": (self.frame_rejected, GRAY),
+        }
+        self._asset_filter = None
+        self._asset_by_iid = {}
+        for kind, (fr, _c) in self._card_frames.items():
+            self._bind_card(fr, kind)
 
         # ---- 结果区：资产列表 / 运行日志 ----
         self.tabview = ctk.CTkTabview(
@@ -712,6 +729,10 @@ class App(ctk.CTk):
         tab_log = self.tabview.add("运行日志")
 
         import tkinter.ttk as ttk
+        self.lbl_filter = ctk.CTkLabel(
+            tab_assets, text="点击上方卡片筛选；再次点击取消 · 双击资产行可人工复核",
+            font=self.f_mono_sm, text_color=GRAY, anchor="w")
+        self.lbl_filter.pack(fill="x", padx=8, pady=(2, 1))
         cols = ("分类", "主机", "IP", "端口", "标题", "敏感发现", "归属说明")
         widths = (64, 190, 115, 55, 190, 150, 330)
         self.tree = ttk.Treeview(tab_assets, columns=cols, show="headings",
@@ -726,6 +747,7 @@ class App(ctk.CTk):
         self.tree.tag_configure("confirmed", foreground=GREEN)
         self.tree.tag_configure("suspect", foreground=ORANGE)
         self.tree.tag_configure("unknown", foreground=GRAY)
+        self.tree.bind("<Double-1>", self._on_tree_double)
 
         # APP 应用标签页（App Store 发现的移动端资产）
         acols = ("应用名", "开发者", "包名", "归属依据")
@@ -796,7 +818,7 @@ class App(ctk.CTk):
         if hint:
             ctk.CTkLabel(txt, text=hint, text_color=GRAY, anchor="w",
                          font=self.f_mono_sm).pack(anchor="w")
-        return num
+        return num, f
 
     def _build_advanced_dialog(self):
         win = ctk.CTkToplevel(self)
@@ -982,12 +1004,180 @@ class App(ctk.CTk):
     def _on_tab_change(self):
         pass   # 预留：点击标签页时的钩子
 
+    def _bind_card(self, widget, kind):
+        """卡片及其子控件都可点击（Tk 子控件不会把点击冒泡给父容器）。"""
+        try:
+            widget.configure(cursor="hand2")
+        except Exception:
+            pass
+        widget.bind("<Button-1>", lambda e, k=kind: self._toggle_filter(k))
+        for child in widget.winfo_children():
+            self._bind_card(child, kind)
+
+    def _toggle_filter(self, kind):
+        """点卡片只看该类资产；再点同一个卡片恢复全部。"""
+        if not self._last_engine:
+            return
+        self._asset_filter = None if self._asset_filter == kind else kind
+        self.tabview.set("资产列表")
+        self._apply_card_styles()
+        self._render_assets()
+
+    def _apply_card_styles(self):
+        for kind, (fr, color) in getattr(self, "_card_frames", {}).items():
+            selected = (self._asset_filter == kind)
+            try:
+                fr.configure(border_color=color if selected else STROKE,
+                             border_width=2 if selected else 1,
+                             fg_color="#0c1928" if selected else CARD)
+            except Exception:
+                pass
+
+    def _update_cards(self):
+        counts = {"确认": 0, "疑似": 0, "存疑": 0}
+        eng = self._last_engine
+        if eng:
+            for a in eng.assets.values():
+                counts[a.confidence] = counts.get(a.confidence, 0) + 1
+        self.card_confirmed.configure(text=str(counts["确认"]))
+        self.card_suspect.configure(text=str(counts["疑似"]))
+        self.card_rejected.configure(text=str(counts["存疑"]))
+        total = sum(counts.values())
+        if self._asset_filter:
+            shown = counts.get(self._asset_filter, 0)
+            self.lbl_filter.configure(
+                text="仅显示：%s（%d / 共 %d）· 再次点击卡片恢复全部"
+                     % (self._asset_filter, shown, total), text_color=ACCENT)
+        else:
+            self.lbl_filter.configure(
+                text="显示全部 %d 个资产 · 点击卡片筛选；再次点击取消 · 双击资产行可人工复核"
+                     % total, text_color=GRAY)
+        return counts
+
+    def _render_assets(self):
+        """按当前筛选状态重绘表格。"""
+        self.tree.delete(*self.tree.get_children())
+        self._asset_by_iid = {}
+        eng = self._last_engine
+        if not eng:
+            self._update_cards()
+            return
+        order = {"确认": 0, "疑似": 1, "存疑": 2}
+        tag_map = {"确认": "confirmed", "疑似": "suspect", "存疑": "unknown"}
+        items = [a for a in eng.assets.values()
+                 if self._asset_filter is None or a.confidence == self._asset_filter]
+        items.sort(key=lambda a: (order.get(a.confidence, 3),
+                                  a.host or a.ip or "", str(a.port or "")))
+        for i, a in enumerate(items):
+            plain = cybercensus.plain_evidence(a.evidence, max_items=2) or ""
+            if a.confidence == "存疑" and a.reject_reason:
+                plain = (plain + "；" if plain else "") + "剔除原因：" + a.reject_reason
+            plain = plain or "—"
+            findings = "、".join(sorted(f.split("|", 1)[-1] for f in a.findings))
+            iid = "row%d" % i
+            self.tree.insert("", "end", iid=iid, values=(
+                a.confidence, a.host or a.ip or "", a.ip or "", str(a.port or ""),
+                a.title or "", findings, plain),
+                tags=(tag_map.get(a.confidence, "unknown"),))
+            self._asset_by_iid[iid] = a
+        self._update_cards()
+
     def _populate_table(self, eng):
         """把引擎结果填进资产表格（完成扫描后调用）。"""
-        self.tree.delete(*self.tree.get_children())
-        for r in asset_rows(eng):
-            tag = r[6]
-            self.tree.insert("", "end", values=r[:7], tags=(tag,))
+        self._last_engine = eng
+        self._render_assets()
+
+    def _on_tree_double(self, event):
+        iid = self.tree.identify_row(event.y)
+        a = self._asset_by_iid.get(iid)
+        if a is not None:
+            self._show_asset_detail(a)
+
+    def _show_asset_detail(self, a):
+        """资产详情 + 人工复核改判（剔除/疑似/存疑可互相调整）。"""
+        win = ctk.CTkToplevel(self)
+        win.title("资产详情 / 人工复核")
+        win.geometry("820x640")
+        win.configure(fg_color=BG)
+        win.transient(self)
+        win.after(250, lambda: win.grab_set())
+        txt = ctk.CTkTextbox(win, fg_color="#08101c", text_color=TEXT,
+                             font=self.f_mono_sm, corner_radius=8,
+                             border_width=1, border_color=STROKE)
+        txt.pack(fill="both", expand=True, padx=16, pady=(14, 8))
+
+        def show(msg):
+            txt.insert("end", msg + "\n")
+            txt.see("end")
+
+        def refresh():
+            txt.delete("1.0", "end")
+            show("// ASSET DETAIL  ·  双击行查看 / 人工改判")
+            show("")
+            for label, value in (
+                    ("当前分类", a.confidence),
+                    ("主机", a.host or ""), ("IP", a.ip or ""),
+                    ("端口/协议", "%s / %s" % (a.port or "", a.scheme or "")),
+                    ("状态", a.status or ""), ("标题", a.title or ""),
+                    ("服务器", a.server or ""), ("技术栈", a.tech or ""),
+                    ("证书 O=", a.cert_org or ""),
+                    ("RDAP 注册人", a.rdap_org or ""),
+                    ("备案号", a.beian or ""), ("信用代码", a.credit_code or ""),
+                    ("网站标识码", a.site_code or ""),
+                    ("公安备案", a.police_beian or ""),
+                    ("ASN", ("%s %s" % (a.asn or "", a.asn_org or "")).strip()),
+                    ("邮箱", "、".join(sorted(a.emails)) or ""),
+                    ("电话", "、".join(sorted(a.phones)) or ""),
+                    ("页脚单位", "、".join(sorted(a.authorities)) or ""),
+                    ("统计/像素", "、".join(sorted(a.trackings)) or ""),
+                    ("注册号", "、".join(sorted(a.registry_ids)) or ""),
+                    ("来源", "、".join(sorted(a.source)) or ""),
+                    ("剔除原因", a.reject_reason or "")):
+                if value:
+                    show("%-10s %s" % (label + "：", value))
+            show("")
+            show("证据：")
+            for ev in (a.evidence or []):
+                show("  " + ev)
+            if not a.evidence:
+                show("  （无）")
+            show("")
+            show("提示：人工改判只影响本次结果与随后导出的报告；重新扫描会重新自动分级。")
+
+        refresh()
+
+        row = ctk.CTkFrame(win, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 14))
+
+        def mark(new):
+            old = a.confidence
+            if new == old:
+                return
+            a.confidence = new
+            a.evidence = [e for e in a.evidence if not e.startswith("人工复核|")]
+            a.evidence.append("人工复核|%s→%s" % (old, new))
+            if new != "存疑":
+                a.reject_reason = ""
+            self._append_log("人工复核: %s  %s → %s"
+                             % (a.host or a.ip, old, new), "!")
+            self._render_assets()
+            refresh()
+
+        ctk.CTkLabel(row, text="人工改判：", font=self.f_mono_sm,
+                     text_color=GRAY).pack(side="left")
+        for label, val, color in (("确认", "确认", GREEN),
+                                  ("疑似", "疑似", ORANGE),
+                                  ("存疑/剔除", "存疑", GRAY)):
+            ctk.CTkButton(row, text=label, width=96, height=30, corner_radius=7,
+                          fg_color="transparent", border_width=1,
+                          border_color=color, text_color=color,
+                          hover_color=CARD_HI,
+                          command=lambda v=val: mark(v)
+                          ).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(row, text="关闭", width=80, height=30, corner_radius=7,
+                      fg_color="transparent", border_width=1, border_color=STROKE,
+                      text_color=GRAY, hover_color=CARD_HI,
+                      command=win.destroy).pack(side="right")
 
     def _populate_apps(self, eng):
         """把 App Store 发现的应用填进 APP 标签页。"""
@@ -1179,6 +1369,10 @@ class App(ctk.CTk):
         self.txt_log.configure(state="disabled")
         self.tree.delete(*self.tree.get_children())
         self.tree_apps.delete(*self.tree_apps.get_children())
+        self._asset_filter = None
+        self._asset_by_iid = {}
+        self._last_engine = None
+        self._apply_card_styles()
         for card in (self.card_confirmed, self.card_suspect, self.card_rejected):
             card.configure(text="…")
         self.btn_report.configure(state="disabled")
@@ -1197,6 +1391,10 @@ class App(ctk.CTk):
         self.bar.set(0)
         self._scan_start = time.time()
         self._eta = None
+        self._prog_samples = []
+        self._eta_samples = []
+        self._last_prog_time = self._scan_start
+        self._prog_stage = ""
         self.lbl_progress.configure(text="0% · 估算中…", text_color=ACCENT)
 
         cybercensus.LOG_HOOK = lambda msg, level: self._queue.put(("log", msg, level))
@@ -1268,19 +1466,63 @@ class App(ctk.CTk):
             pct = max(0, min(100, int(pct)))
         except Exception:
             return
+        now = time.time()
         self.bar.set(pct / 100.0)
-        elapsed = max(0.1, time.time() - (self._scan_start or time.time()))
-        if 0 < pct < 100:
-            eta = elapsed * (100 - pct) / pct
-            # 指数平滑：避免某一阶段突然变快/变慢导致剩余时间来回跳
-            self._eta = eta if self._eta is None else self._eta * 0.65 + eta * 0.35
-            self.lbl_progress.configure(
-                text="%d%% · 剩余约 %s" % (pct, self._fmt_dur(self._eta)),
-                text_color=ACCENT)
-        elif pct >= 100:
+        elapsed = max(0.1, now - (self._scan_start or now))
+        self._last_prog_time = now
+        if text:
+            self._prog_stage = text
+        if pct >= 100:
             self.lbl_progress.configure(
                 text="100%% · 用时 %s" % self._fmt_dur(elapsed),
                 text_color=GREEN)
+            return
+        if pct <= 0:
+            self.lbl_progress.configure(text="0% · 估算中…", text_color=ACCENT)
+            return
+
+        # 记录最近 90 秒的 (时间, 百分比)，用"最近速率"而不是全程平均：
+        # 各阶段耗时差异很大，全程平均会在进入快阶段后严重高估。
+        self._prog_samples.append((now, pct))
+        self._prog_samples = [(t, p) for t, p in self._prog_samples
+                              if now - t <= 90]
+        raw = None
+        if len(self._prog_samples) >= 2 and elapsed >= 8 and pct >= 3:
+            t0, p0 = self._prog_samples[0]
+            dt = now - t0
+            dp = pct - p0
+            if dt >= 5 and dp > 0:
+                raw = (100 - pct) * dt / dp
+        if raw is not None:
+            self._eta_samples.append(raw)
+            self._eta_samples = self._eta_samples[-7:]
+            ordered = sorted(self._eta_samples)
+            med = ordered[len(ordered) // 2]
+            # 再做一次轻平滑，避免单次阶段跳变导致数字大幅跳动
+            self._eta = med if self._eta is None else self._eta * 0.6 + med * 0.4
+        stage = (self._prog_stage or "")[:18]
+        if self._eta is None or elapsed < 8 or pct < 3:
+            self.lbl_progress.configure(
+                text="%d%% · %s · 估算中…" % (pct, stage or "准备"),
+                text_color=ACCENT)
+        else:
+            self.lbl_progress.configure(
+                text="%d%% · %s · 约剩 %s"
+                     % (pct, stage or "扫描", self._fmt_dur(self._eta)),
+                text_color=ACCENT)
+
+    def _tick_eta(self):
+        """长时间没有进度上报时（如平台 API 等待），提示而不是让 ETA 乱跳。"""
+        try:
+            running = self._worker and self._worker.is_alive()
+            if (running and self._last_prog_time
+                    and time.time() - self._last_prog_time > 40):
+                base = self.lbl_progress.cget("text").split(" · 约剩")[0]
+                self.lbl_progress.configure(
+                    text="%s · 当前阶段较慢…" % base, text_color=ORANGE)
+            self.after(2000, self._tick_eta)
+        except Exception:
+            pass
 
     def _on_done(self, eng):
         self._set_running(False)
