@@ -1628,6 +1628,60 @@ class TestOperatorCandidates(unittest.TestCase):
             "川移", "wap.sc.10086.cn", "中国移动APP"))
 
 
+class TestReportFormats(unittest.TestCase):
+    MD = ("# 标题\n\n- **确认**：某医院\n\n"
+          "| 主机 | 端口 |\n|------|------|\n| www.x.com | 443 |\n")
+
+    def test_md_to_text(self):
+        txt = cybercensus.md_to_text(self.MD)
+        self.assertIn("标题", txt)
+        self.assertIn("• 确认：某医院", txt)
+        self.assertIn("www.x.com  443", txt)
+        self.assertNotIn("**", txt)
+        self.assertNotIn("|---", txt)
+
+    def test_write_docx_structure(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.docx")
+            cybercensus.write_docx(p, self.MD)
+            with zipfile.ZipFile(p) as z:
+                names = set(z.namelist())
+                self.assertIn("word/document.xml", names)
+                self.assertIn("[Content_Types].xml", names)
+                doc = z.read("word/document.xml").decode("utf-8")
+                self.assertIn("标题", doc)
+                self.assertIn("www.x.com", doc)
+                self.assertIn("<w:tbl>", doc)
+
+    def test_output_txt_and_docx(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = argparse.Namespace(beian="", threads=10, timeout=5, out=d,
+                                      output_formats="txt,docx", active=False,
+                                      no_probe=False)
+            e = cybercensus.Engine(args)
+            a = e.add_asset("www.x.com", 443, "https", source="anchor")
+            a.confidence = "确认"
+            a.title = "测试站"
+            files, _j, _m = e.output()
+            self.assertTrue(os.path.isfile(files["txt"]))
+            self.assertTrue(os.path.isfile(files["docx"]))
+            with zipfile.ZipFile(files["docx"]) as z:
+                self.assertIn("www.x.com",
+                              z.read("word/document.xml").decode("utf-8"))
+
+    def test_pdf_without_browser(self):
+        orig = cybercensus.find_pdf_browser
+        cybercensus.find_pdf_browser = lambda: ""
+        self.addCleanup(cybercensus.__setattr__, "find_pdf_browser", orig)
+        with tempfile.TemporaryDirectory() as d:
+            html = os.path.join(d, "a.html")
+            with open(html, "w", encoding="utf-8") as f:
+                f.write("<html></html>")
+            ok, msg = cybercensus.html_to_pdf(html, os.path.join(d, "a.pdf"))
+            self.assertFalse(ok)
+            self.assertIn("Edge", msg)
+
+
 class TestPathHarvest(unittest.TestCase):
     def test_parse_robots(self):
         txt = ("User-agent: *\n"

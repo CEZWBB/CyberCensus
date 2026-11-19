@@ -1128,25 +1128,42 @@ class App(ctk.CTk):
             return
         win = ctk.CTkToplevel(self)
         win.title("生成报告")
-        win.geometry("460x370")
+        win.geometry("600x590")
         win.resizable(False, False)
         win.after(300, lambda: win.grab_set())
 
         ctk.CTkLabel(win, text="选择要导出的报告格式",
                      font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w",
-                                                                    padx=18, pady=(16, 8))
-        var_md = ctk.BooleanVar(value=True)
+                                                                    padx=18, pady=(14, 2))
+        ctk.CTkLabel(win, text="可多选；每个格式的用途见括号说明",
+                     font=self.f_mono_sm, text_color=GRAY
+                     ).pack(anchor="w", padx=20, pady=(0, 6))
+
         var_html = ctk.BooleanVar(value=True)
+        var_pdf = ctk.BooleanVar(value=False)
+        var_docx = ctk.BooleanVar(value=False)
+        var_txt = ctk.BooleanVar(value=False)
+        var_md = ctk.BooleanVar(value=True)
         var_csv = ctk.BooleanVar(value=True)
         var_json = ctk.BooleanVar(value=False)
-        ctk.CTkSwitch(win, text="网页报告（HTML，带资产关系图，适合交付）",
-                      variable=var_html).pack(anchor="w", padx=22, pady=3)
-        ctk.CTkSwitch(win, text="可读报告（MD，纯文本版）",
-                      variable=var_md).pack(anchor="w", padx=22, pady=3)
-        ctk.CTkSwitch(win, text="资产台账（CSV，适合 Excel 管理）",
-                      variable=var_csv).pack(anchor="w", padx=22, pady=3)
-        ctk.CTkSwitch(win, text="原始数据（JSON，适合程序处理）",
-                      variable=var_json).pack(anchor="w", padx=22, pady=3)
+
+        opts = [
+            (var_html, "网页报告（HTML）—— 带资产关系图，适合交付、浏览器直接查看/打印"),
+            (var_pdf, "PDF 报告 —— 由 HTML 无头打印生成，适合邮件、存档、打印（需 Edge/Chrome）"),
+            (var_docx, "Word 报告（DOCX）—— 可编辑，适合二次编写、加公司抬头"),
+            (var_txt, "纯文本报告（TXT）—— 适合贴聊天工具、工单系统、邮件正文"),
+            (var_md, "Markdown 报告（MD）—— 纯文本带排版标记，适合 Git/文档系统"),
+            (var_csv, "资产台账（CSV）—— 适合 Excel 管理、筛选、交付客户"),
+            (var_json, "原始数据（JSON）—— 完整结构化数据，适合程序二次处理"),
+        ]
+        for var, label in opts:
+            ctk.CTkSwitch(win, text=label, variable=var,
+                          font=ctk.CTkFont(size=12)
+                          ).pack(anchor="w", padx=22, pady=4)
+
+        ctk.CTkLabel(win, text="提示：PDF 依赖本机 Edge/Chrome；没有浏览器时请选 HTML。",
+                     font=self.f_mono_sm, text_color=GRAY
+                     ).pack(anchor="w", padx=22, pady=(4, 0))
 
         frm_dir = ctk.CTkFrame(win, fg_color="transparent")
         frm_dir.pack(fill="x", padx=18, pady=(10, 4))
@@ -1160,8 +1177,11 @@ class App(ctk.CTk):
                       ).pack(side="left")
 
         def _generate():
-            fmts = [k for k, v in (("html", var_html.get()), ("md", var_md.get()),
-                                   ("csv", var_csv.get()), ("json", var_json.get())) if v]
+            fmts = [k for k, v in (
+                ("html", var_html.get()), ("pdf", var_pdf.get()),
+                ("docx", var_docx.get()), ("txt", var_txt.get()),
+                ("md", var_md.get()), ("csv", var_csv.get()),
+                ("json", var_json.get())) if v]
             if not fmts:
                 messagebox.showwarning("未选择格式", "请至少选择一种报告格式。", parent=win)
                 return
@@ -1191,6 +1211,14 @@ class App(ctk.CTk):
 
     def _on_report_done(self, files, json_path, md_path):
         n = len(files) + (1 if json_path else 0) + (1 if md_path else 0)
+        if n == 0:
+            self._append_log("报告生成失败：没有产生任何文件（PDF 需要本机 Edge/Chrome）", "!")
+            self.btn_report.configure(state="normal")
+            self._set_status("● 报告生成失败", RED)
+            messagebox.showwarning("生成失败",
+                                   "没有生成任何文件，请查看运行日志；"
+                                   "PDF 需要本机安装 Edge 或 Chrome。")
+            return
         self._append_log("报告已生成：%d 个文件" % n, "+")
         if files.get("confirmed"):
             self._append_log("确认台账：%s" % files["confirmed"], "+")
@@ -1206,6 +1234,10 @@ class App(ctk.CTk):
             self._last_html_path = files["html"]
             self.btn_open_html.configure(state="normal")
             self._append_log("网页报告：%s" % files["html"], "+")
+        for key, label in (("docx", "Word 报告"), ("pdf", "PDF 报告"),
+                           ("txt", "纯文本报告")):
+            if files.get(key):
+                self._append_log("%s：%s" % (label, files[key]), "+")
         self._set_status("● 报告已生成", GREEN)
         messagebox.showinfo("完成", "报告已生成（%d 个文件），见「打开输出文件夹」。" % n)
 

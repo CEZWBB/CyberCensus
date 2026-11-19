@@ -61,7 +61,7 @@ pyinstaller --onefile --windowed --name CyberCensus --collect-all customtkinter 
 - 左侧栏"本机外部引擎"实时显示四个外部工具的 READY / MISSING 状态；平台开关按已配置的 Key 自动启用
 - 运行时进度条流动、日志彩色实时滚动（青=阶段 / 绿=命中 / 黄=警告）
 - **扫描不自动写报告**：完成后结果直接进"资产列表"表格（分类/主机/IP/端口/标题/白话归属说明，按确认→疑似→存疑着色排序），先在界面里看
-- 满意后再点 **⬇ 生成报告…** 按需选择导出格式（可读报告 MD / 资产台账 CSV / 原始数据 JSON）和保存位置
+- 满意后再点 **⬇ 生成报告…** 按需选择导出格式（网页 HTML / PDF / Word DOCX / 纯文本 TXT / Markdown MD / 资产台账 CSV / 原始数据 JSON），对话框内每种格式都有一句话用途说明；保存位置可改
 - "高级参数"是独立设置窗口（并发/端口/输出目录/敏感路径/外部工具/Webhook），不再挤占结果区
 - 「高级参数 → APP/小程序包」可导入本机 APK / `.wxapkg`（文件或目录），本地静态提取包内硬编码后台域名与接口地址；扫描即使 0 资产，只要 APP/包/密钥有结果也能生成报告
 
@@ -142,7 +142,7 @@ pyinstaller --onefile --windowed --collect-all customtkinter asm_gui.pyw
 | 白话归属说明 | 每条资产为什么算它的，用非技术语言写清楚 | 开 |
 | 增量监控 | 留 `baseline.json`，下轮对比新增/变化/下线 | 开 |
 | Webhook | 扫描完成/发现新增时推钉钉/企微/飞书 | 关（`--webhook`） |
-| 报告格式 | HTML（带关系图，推荐交付）/ MD / CSV / JSON | 界面默认 HTML+MD+CSV |
+| 报告格式 | HTML（带关系图，推荐交付）/ PDF / Word(DOCX) / TXT / MD / CSV / JSON | 界面默认 HTML+MD+CSV；PDF/Word/TXT 可勾选，每个格式在对话框里有用途说明 |
 
 ### 7. 模式与速度
 
@@ -375,7 +375,7 @@ run.bat -d xx.gov.cn
 | `--timeout` | HTTP/TLS 探测超时秒数，默认 10 |
 | `--scan-timeout` | TCP 端口扫描连接超时秒数，默认 2.5（与 `--timeout` 独立） |
 | `--out` | 输出目录，默认 `cybercensus_out` |
-| `--formats` | 输出格式：`md` / `csv` / `html` / `json`，逗号分隔 |
+| `--formats` | 输出格式：`md` / `csv` / `html` / `json` / `txt` / `docx`（或 `word`）/ `pdf`，逗号分隔 |
 | `--webhook` | 扫描完成/新增资产推送到钉钉/企微/飞书机器人 |
 | `--yes` | 跳过主动扫描的授权确认 |
 | `--quiet` | 少输出日志（不影响结果） |
@@ -480,8 +480,11 @@ run.bat -d xx.gov.cn
 | `cybercensus_时间戳_rejected.csv` | 已剔除资产 + 剔除原因（含第三方云/CDN） |
 | `cybercensus_时间戳_all.csv` | 全量结果（排查用） |
 | `cybercensus_时间戳.json` | 完整结构化数据（锚点、IP 归属、平台统计、每条证据、APP/包、路径线索） |
-| `cybercensus_时间戳.md` | 可读报告（平台取数统计、平台交叉分析、三类清单、判定规则） |
-| `cybercensus_时间戳.html` | 自包含网页报告（深色单文件，含资产关系图，适合交付） |
+| `cybercensus_时间戳.md` | 可读报告（Markdown，平台取数统计、平台交叉分析、三类清单、判定规则） |
+| `cybercensus_时间戳.html` | 自包含网页报告（深色单文件，含资产关系图，适合交付/打印） |
+| `cybercensus_时间戳.txt` | 纯文本报告（去掉 Markdown 标记，适合贴聊天/工单/邮件正文） |
+| `cybercensus_时间戳.docx` | Word 报告（可编辑，适合二次编写、加公司抬头） |
+| `cybercensus_时间戳.pdf` | PDF 报告（由 HTML 无头打印，适合邮件/存档；需本机 Edge/Chrome） |
 
 CSV 字段（最后一列 `plain` 是证据的白话翻译，方便不看技术细节的人理解归属依据）：
 
@@ -507,7 +510,7 @@ source, evidence, reject_reason, urls, plain
 7. **平台请求错误分类**：401/403 等立即失败不重试，429/5xx 按 `Retry-After` 退避；`--debug-provider` 现在会真实打印翻译后的原生查询与跳过原因。
 8. **Hunter 单页取 100 条**（原 10 条）：限速 2 秒/次不变，取数效率 ×10，单查询配额口径以平台实际计费为准。
 9. **名称模式官网自举（无需任何平台 Key）**：只给单位名称时，先用 cn.bing.com 搜索单位名提取候选域名（自动排除搜索引擎/医疗目录/百科企查等聚合站），再逐个探测首页并用**页面标题 / 证书 O= 与主体名互证**过滤——验证通过的域名（主机名+根域名）才进入锚点流，目录站和政府门户等误留候选在验证环节被拦截；**根域名一并入锚点**，子域枚举按根域查更全。纯被动模式（`--no-probe`）不探测候选首页（不触碰目标），候选域名以**未验证弱锚点**加入——结果只进"疑似"，不会污染"确认"。可用 `--no-discover` 显式关闭。
-10. **输出格式可选**：`--formats md,csv,html,json` 选择输出哪些格式（CLI 默认全出）；界面「生成报告」对话框有四个开关（默认 网页HTML + 可读MD + 台账CSV，原始 JSON 默认关闭）。
+10. **输出格式可选**：`--formats md,csv,html,json,txt,docx,pdf` 选择输出哪些格式（CLI 默认 md,csv,html）；界面「生成报告」对话框有七个开关（默认 网页HTML + 可读MD + 台账CSV；PDF/Word/TXT/JSON 按需勾选）。PDF 由本机 Edge/Chrome 无头打印 HTML 生成，没有浏览器时会明确提示并保留其它格式。
 11. **敏感路径探测（授权渗透信息收集）**：对存活 Web 资产探测 `.git`/`.env`/`.svn`、Spring Actuator（含 heapdump）、Swagger 文档、Druid 监控台、phpinfo、站点备份包（web.zip 等）共 18 条高信噪比规则——**每条都做内容验证**（魔数/特征串），全站自定义 404 不会误报。主动模式默认开启，`--sensitive` 可在复核模式显式开启，`--no-sensitive` 强制关闭；结果挂资产的 `findings` 字段，报告单列"⚠️ 敏感路径发现"节，不参与归属分级。
 12. **增量监控（基线对比）**：每轮扫描在输出目录留 `baseline.json` 资产指纹基线；下轮自动对比——**新增资产/新敏感发现/分级变化/已下线**逐条告警（日志+报告"增量对比"节）。定期对同一目标重跑即可实现 ARL 式巡航：新上线的业务和新增泄露会自动高亮。
 13. **UA 轮换 + 探测节奏**：探测目标时从 8 种主流浏览器 UA 中随机轮换（降低按单一 UA 拉黑的概率）；`--probe-interval N` 设置全局请求间隔（默认 0 不限流，建议 0.1~0.5）。授权测试的正确姿势仍是向甲方申请 WAF 白名单——节奏控制是"礼貌探测"，不是规避手段。

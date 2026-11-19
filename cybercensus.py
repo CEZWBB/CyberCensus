@@ -3987,17 +3987,43 @@ class Engine(object):
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
 
+        if "word" in fmts:
+            fmts.add("docx")
+        report_md = ""
+        if fmts & {"md", "txt", "docx"}:
+            report_md = self._report(rows, groups, ts, baseline_diff)
         md_path = ""
         if "md" in fmts:
             md_path = base + ".md"
             with open(md_path, "w", encoding="utf-8") as f:
-                f.write(self._report(rows, groups, ts, baseline_diff))
+                f.write(report_md)
+        if "txt" in fmts:
+            files["txt"] = base + ".txt"
+            write_text_report(files["txt"], report_md)
+        if "docx" in fmts:
+            files["docx"] = base + ".docx"
+            write_docx(files["docx"], report_md)
 
-        if "html" in fmts:
+        html_path = ""
+        if "html" in fmts or "pdf" in fmts:
             html_path = base + ".html"
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(self._html_report(rows, groups, ts, baseline_diff))
-            files["html"] = html_path
+            if "html" in fmts:
+                files["html"] = html_path
+        if "pdf" in fmts:
+            pdf_path = base + ".pdf"
+            ok, msg = html_to_pdf(html_path, pdf_path)
+            if ok:
+                files["pdf"] = pdf_path
+            else:
+                log("PDF 生成失败: %s" % msg, "!")
+            # HTML 只是 PDF 的中间产物时，不留在输出目录
+            if "html" not in fmts and os.path.isfile(html_path):
+                try:
+                    os.unlink(html_path)
+                except Exception:
+                    pass
 
         for k in ("confirmed", "suspect", "rejected", "all"):
             if k in files:
@@ -4006,8 +4032,10 @@ class Engine(object):
             log("JSON      %s" % json_path, "+")
         if md_path:
             log("MD        %s" % md_path, "+")
-        if "html" in files:
-            log("HTML      %s" % files["html"], "+")
+        for k, label in (("html", "HTML"), ("txt", "TXT"),
+                         ("docx", "WORD"), ("pdf", "PDF")):
+            if k in files:
+                log("%-10s %s" % (label, files[k]), "+")
         return files, json_path, md_path
 
     def _report(self, rows, groups, ts, baseline_diff=None):
@@ -4793,6 +4821,182 @@ def _md(s):
     return str(s).replace("|", "\\|").replace("\n", " ")
 
 
+# ----------------------------------------------------------------------------
+# 报告导出：TXT / Word(DOCX) / PDF
+#
+# 不引入第三方库：
+#   · TXT   —— 把 Markdown 报告转成纯文本
+#   · DOCX  —— 直接生成 OOXML（docx 本质是 zip + document.xml）
+#   · PDF   —— 用本机 Edge/Chrome 的无头打印把 HTML 报告转成 PDF
+# 若机器上没有 Edge/Chrome，PDF 会明确报错并保留其它格式。
+# ----------------------------------------------------------------------------
+def _md_inline(s):
+    s = str(s or "")
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    s = re.sub(r"`([^`]*)`", r"\1", s)
+    s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)
+    return s
+
+
+def md_to_text(md):
+    """Markdown 报告 → 纯文本（表格用两空格分隔，去掉标记符号）。"""
+    out = []
+    for line in (md or "").splitlines():
+        if line.startswith("```"):
+            continue
+        if re.match(r"^\|[\s:\-|]+\|$", line):
+            continue
+        if line.startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            out.append("  ".join(_md_inline(c) for c in cells))
+            continue
+        s = re.sub(r"^#{1,6}\s*", "", line)
+        s = _md_inline(s)
+        if s.startswith("- "):
+            s = "• " + s[2:]
+        out.append(s)
+    return "\n".join(out)
+
+
+def write_text_report(path, md):
+    with open(path, "w", encoding="utf-8-sig") as fh:
+        fh.write(md_to_text(md))
+
+
+def _xml_esc(s):
+    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _docx_run(text, bold=False, size=None):
+    rpr = ""
+    if bold or size:
+        rpr = "<w:rPr>%s%s</w:rPr>" % (
+            "<w:b/>" if bold else "",
+            '<w:sz w:val="%d"/>' % size if size else "")
+    return ('<w:r>%s<w:t xml:space="preserve">%s</w:t></w:r>'
+            % (rpr, _xml_esc(text)))
+
+
+def _docx_para(text, bold=False, size=None):
+    return ('<w:p><w:pPr><w:spacing w:after="100"/></w:pPr>%s</w:p>'
+            % _docx_run(text, bold, size))
+
+
+def _docx_table(rows):
+    sides = ("top", "left", "bottom", "right", "insideH", "insideV")
+    borders = ("<w:tblBorders>" + "".join(
+        '<w:%s w:val="single" w:sz="4" w:space="0" w:color="999999"/>' % s
+        for s in sides) + "</w:tblBorders>")
+    xml = ['<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>%s</w:tblPr>'
+           % borders]
+    for ri, row in enumerate(rows):
+        xml.append("<w:tr>")
+        for cell in row:
+            xml.append(
+                '<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>'
+                '%s</w:tc>' % _docx_para(
+                    _md_inline(cell).replace("\n", " "),
+                    bold=(ri == 0), size=18))
+        xml.append("</w:tr>")
+    xml.append("</w:tbl>")
+    return "".join(xml)
+
+
+def write_docx(path, md):
+    """把 Markdown 报告写成最小可用的 Word(DOCX) 文件。"""
+    body, lines = [], (md or "").splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("```"):
+            i += 1
+            continue
+        if (line.startswith("|") and i + 1 < len(lines)
+                and re.match(r"^\|[\s:\-|]+\|$", lines[i + 1])):
+            rows = []
+            while i < len(lines) and lines[i].startswith("|"):
+                if not re.match(r"^\|[\s:\-|]+\|$", lines[i]):
+                    rows.append([c.strip() for c in
+                                 lines[i].strip().strip("|").split("|")])
+                i += 1
+            if rows:
+                body.append(_docx_table(rows))
+            continue
+        if line.startswith("#"):
+            level = len(line) - len(line.lstrip("#"))
+            text = _md_inline(line[level:].strip())
+            body.append(_docx_para(text, bold=True,
+                                   size={1: 36, 2: 30, 3: 26}.get(level, 23)))
+        elif line.strip():
+            text = _md_inline(line)
+            if text.startswith("- "):
+                text = "• " + text[2:]
+            body.append(_docx_para(text))
+        elif body and body[-1] != "<w:p/>":
+            body.append("<w:p/>")
+        i += 1
+
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           '<w:body>%s<w:sectPr/></w:body></w:document>' % "".join(body))
+    ct = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          '<Default Extension="xml" ContentType="application/xml"/>'
+          '<Override PartName="/word/document.xml" ContentType="application/'
+          'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+          '</Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/'
+            'officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            '</Relationships>')
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ct)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", doc)
+
+
+def find_pdf_browser():
+    """找本机可用的 Edge/Chrome（用于 HTML → PDF 无头打印）。"""
+    cands = [shutil.which("msedge"), shutil.which("chrome"),
+             shutil.which("chromium"),
+             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"]
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return ""
+
+
+def html_to_pdf(html_path, pdf_path, timeout=90):
+    """用 Edge/Chrome 无头模式把 HTML 报告打印成 PDF。返回 (ok, 错误信息)。"""
+    exe = find_pdf_browser()
+    if not exe:
+        return False, "未找到 Edge/Chrome，可用 HTML 报告代替"
+    profile = tempfile.mkdtemp(prefix="cc_pdf_")
+    uri = urllib.parse.urljoin(
+        "file:", urllib.request.pathname2url(os.path.abspath(html_path)))
+    try:
+        for headless in ("--headless=new", "--headless"):
+            cmd = [exe, headless, "--disable-gpu", "--no-first-run",
+                   "--no-default-browser-check", "--no-pdf-header-footer",
+                   "--user-data-dir=" + profile,
+                   "--print-to-pdf=" + os.path.abspath(pdf_path), uri]
+            try:
+                _run_ext(cmd, timeout)
+            except Exception:
+                continue
+            if os.path.isfile(pdf_path) and os.path.getsize(pdf_path) > 0:
+                return True, ""
+        return False, "浏览器渲染 PDF 失败（可改用 HTML）"
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 # 证据条目 → 新手可读的白话解释（按 evidence 前缀匹配，未命中保留原文）
 _PLAIN_EVIDENCE = (
     ("A|页面备案号一致", "网站页脚的ICP备案号与目标单位备案号一致"),
@@ -4952,7 +5156,8 @@ def build_parser():
                    help="TCP 端口扫描连接超时秒数（默认2.5；与 --timeout 的 HTTP 超时独立）")
     p.add_argument("--out", default="cybercensus_out", help="输出目录")
     p.add_argument("--formats", default="md,csv,html", dest="output_formats",
-                   help="输出哪些格式：md / csv / html / json，逗号分隔（默认 md,csv,html）")
+                   help="输出哪些格式：md / csv / html / json / txt / docx（word）/ pdf，"
+                        "逗号分隔（默认 md,csv,html）")
     p.add_argument("--webhook", default="",
                    help="扫描完成/发现新增资产时推送到 Webhook（钉钉/企业微信/飞书机器人 URL）")
     p.add_argument("--no-probe", action="store_true", help="完全不触碰目标（纯第三方数据）")
