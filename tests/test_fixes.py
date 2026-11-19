@@ -1628,6 +1628,22 @@ class TestOperatorCandidates(unittest.TestCase):
             "川移", "wap.sc.10086.cn", "中国移动APP"))
 
 
+class TestFastMode(unittest.TestCase):
+    def test_applies_limits_and_reports_skips(self):
+        args = argparse.Namespace(
+            scan_timeout=5.0, timeout=15.0, threads=10,
+            no_brute=False, no_hints=False, ext_sub_limit=5000)
+        skipped = cybercensus.apply_fast_mode(args)
+        self.assertEqual(args.scan_timeout, 1.2)
+        self.assertEqual(args.timeout, 8.0)
+        self.assertEqual(args.threads, 50)
+        self.assertTrue(args.no_brute)
+        self.assertTrue(args.no_hints)
+        self.assertEqual(args.verify_attempts, 4)
+        self.assertEqual(args.ext_sub_limit, 1000)
+        self.assertIn("DNS小字典", skipped)
+
+
 class TestAliasVariants(unittest.TestCase):
     def test_full_name_generates_short_forms(self):
         v = cybercensus.alias_variants("中国移动通信集团四川有限公司")

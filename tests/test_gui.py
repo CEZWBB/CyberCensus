@@ -133,6 +133,10 @@ class TestBuildArgs(unittest.TestCase):
         args = gui.build_args("standard", [], webhook="https://hook.example/x")
         self.assertEqual(args.webhook, "https://hook.example/x")
 
+    def test_fast_mode_passthrough(self):
+        self.assertTrue(gui.build_args("standard", [], fast=True).fast)
+        self.assertFalse(gui.build_args("standard", []).fast)
+
     def test_intel_passthrough(self):
         args = gui.build_args("standard", [], intel="C:/x/intel.json")
         self.assertEqual(args.intel, "C:/x/intel.json")

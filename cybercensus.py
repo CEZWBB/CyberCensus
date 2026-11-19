@@ -2422,7 +2422,7 @@ class Engine(object):
                 if not _gov_candidate_allowed(name, dom):
                     log("  跳过非政务目标的政府门户候选: %s" % dom)
                     continue
-                if attempts >= 8:
+                if attempts >= int(getattr(self.args, "verify_attempts", 8) or 8):
                     break
                 attempts += 1
                 if self._verify_candidate_domain(name, dom):
@@ -4640,6 +4640,24 @@ def _add_ip_target(ips, t):
     return None
 
 
+def apply_fast_mode(args):
+    """极速模式：收敛超时/并发并关闭慢速阶段（返回被跳过的阶段说明）。"""
+    skipped = []
+    args.scan_timeout = min(float(getattr(args, "scan_timeout", 2.5)), 1.2)
+    args.timeout = min(float(getattr(args, "timeout", 10)), 8)
+    args.threads = max(int(getattr(args, "threads", 20)), 50)
+    if not getattr(args, "no_brute", False):
+        skipped.append("DNS小字典")
+    args.no_brute = True
+    if not getattr(args, "no_hints", False):
+        skipped.append("搜索引擎情报")
+    args.no_hints = True
+    args.verify_attempts = 4
+    if getattr(args, "ext_sub_limit", None):
+        args.ext_sub_limit = min(int(args.ext_sub_limit), 1000)
+    return skipped
+
+
 def parse_ports(s):
     ports = set()
     for part in s.split(","):
@@ -4713,6 +4731,8 @@ def build_parser():
                    help="本机微信小程序包（.wxapkg）文件或目录（可多次），同上")
     p.add_argument("--intel", default="",
                    help="外部模型/子 agent 产出的理解结果 JSON（别名/查询词/候选域名；仍走互证）")
+    p.add_argument("--fast", action="store_true",
+                   help="极速模式：跳过慢速阶段、缩短超时、提高并发（降低覆盖换速度）")
     p.add_argument("--no-hints", action="store_true",
                    help="不做搜索引擎 dork 风险情报（默认开启）")
     p.add_argument("--sensitive", action="store_true",
@@ -4801,6 +4821,13 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
             bucket["aliases"] = bucket["aliases"][:20]
             bucket["seeds"] = bucket["seeds"][:20]
         save_alias_cache(cache)
+
+    # 极速模式：网络扫描的瓶颈是 RTT/限速，不是算力；用"少而快"换速度
+    fast = bool(getattr(args, "fast", False))
+    if fast:
+        skipped = apply_fast_mode(args)
+        log("极速模式：跳过 %s / 公众号 / JS 深挖，连接超时 1.2s、并发 ≥50"
+            "（覆盖会下降）" % (" / ".join(skipped) if skipped else "无"), "!")
     for b in [args.beian] if args.beian else []:
         eng.anchor["beian"].add(b)
     for n in names:
@@ -4827,8 +4854,8 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         # 搜索引擎风险情报（dork：后台入口 / GitHub 泄露，不触碰目标）
         if not getattr(args, "no_hints", False):
             eng.collect_risk_hints()
-        # 公众号文章域名挖掘（文档阶段六；需探测验证，纯被动模式跳过）
-        if not args.no_probe:
+        # 公众号文章域名挖掘（文档阶段六；需探测验证，纯被动/极速模式跳过）
+        if not args.no_probe and not fast:
             eng.mine_weixin_domains()
         # 移动端 APP 发现（App Store 免费 API，第三方查询不触碰目标）
         if not getattr(args, "no_apps", False):
@@ -4854,13 +4881,15 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
         do_sens = (not getattr(args, "no_sensitive", False)) and (
             getattr(args, "sensitive", False) or args.active)
         if do_sens and not _stopped():
-            eng.probe_sensitive(limit=getattr(args, "sensitive_limit", 200))
+            sens_limit = int(getattr(args, "sensitive_limit", 200) or 200)
+            eng.probe_sensitive(limit=min(sens_limit, 50) if fast else sens_limit)
     if not _stopped():
         # APP/小程序包静态分析（本地包，用户提供）→ 候选域名
         eng.analyze_packages(getattr(args, "app_packages", []))
         # JS 文件挖掘（域名 + 密钥特征）→ 页面外链 + 包内候选互证
-        eng.mine_js_secrets()
-        eng.mine_and_verify_refs(limit=10)
+        if not fast:
+            eng.mine_js_secrets()
+            eng.mine_and_verify_refs(limit=10)
     if _stopped():
         log("已请求停止：对已收集的数据做分级输出。", "!")
     # 先合并"仅主机"占位资产，GUI 不落盘时也能得到去重后的台账

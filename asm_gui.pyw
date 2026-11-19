@@ -147,7 +147,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
                formats=None, sensitive=None, probe_interval=0.0, webhook="",
-               ext=True, packages=None, intel=""):
+               ext=True, packages=None, intel="", fast=False):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
@@ -193,6 +193,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         ext_sub_limit=3000,
         app_packages=list(packages or []),
         intel=intel or "",
+        fast=bool(fast),
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
@@ -630,7 +631,7 @@ class App(ctk.CTk):
     def _build_advanced_dialog(self):
         win = ctk.CTkToplevel(self)
         win.title("高级参数 · CyberCensus")
-        win.geometry("800x450")
+        win.geometry("800x490")
         win.configure(fg_color=BG)
         win.withdraw()
         win.protocol("WM_DELETE_WINDOW", win.withdraw)
@@ -716,6 +717,12 @@ class App(ctk.CTk):
                      ).grid(row=6, column=1, columnspan=4, sticky="we", padx=(0, 4))
         ctk.CTkButton(f, text="文件…", width=64, command=self._pick_intel
                       ).grid(row=6, column=5, sticky="w", padx=(6, 14))
+
+        self.var_fast = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(f, text="极速模式：跳过慢速阶段、缩短超时、提高并发（覆盖会下降）",
+                      variable=self.var_fast, progress_color=ORANGE
+                      ).grid(row=7, column=0, columnspan=6, sticky="w",
+                             padx=(14, 0), pady=(8, 10))
 
         ctk.CTkLabel(win, text="提示：平台翻页越多越慢、越费配额；全端口扫描建议仅在授权窗口期使用。",
                      font=self.f_mono_sm, text_color=GRAY
@@ -978,6 +985,7 @@ class App(ctk.CTk):
             ext=self.var_ext.get(),
             packages=packages,
             intel=self.var_intel.get().strip(),
+            fast=self.var_fast.get(),
         )
         self._last_out_dir = args.out
 
