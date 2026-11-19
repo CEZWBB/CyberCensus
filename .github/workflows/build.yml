@@ -21,11 +21,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install customtkinter dnspython cryptography pyinstaller
+          pip install customtkinter dnspython cryptography pypinyin pyinstaller
 
       - name: Build single-file EXE
         run: |
-          pyinstaller --onefile --windowed --name CyberCensus --collect-all customtkinter asm_gui.pyw
+          pyinstaller --onefile --windowed --name CyberCensus --collect-all customtkinter --collect-all pypinyin asm_gui.pyw
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2

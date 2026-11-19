@@ -133,6 +133,11 @@ class TestBuildArgs(unittest.TestCase):
         args = gui.build_args("standard", [], webhook="https://hook.example/x")
         self.assertEqual(args.webhook, "https://hook.example/x")
 
+    def test_provider_keyword_passthrough(self):
+        self.assertTrue(gui.build_args(
+            "standard", [], provider_keyword=True).provider_keyword)
+        self.assertFalse(gui.build_args("standard", []).provider_keyword)
+
     def test_paths_passthrough(self):
         self.assertFalse(gui.build_args("standard", []).no_paths)
         self.assertTrue(gui.build_args("standard", [], paths=False).no_paths)

@@ -1628,6 +1628,103 @@ class TestOperatorCandidates(unittest.TestCase):
             "川移", "wap.sc.10086.cn", "中国移动APP"))
 
 
+class TestOperatorDomainVerify(unittest.TestCase):
+    def test_district_site_verified_by_cert_brand(self):
+        e = cybercensus.Engine(argparse.Namespace(beian="", threads=10, timeout=5))
+        e.names = ["双流电信"]
+        orig_probe = cybercensus.http_probe
+        orig_cert = cybercensus.tls_cert_info
+        cybercensus.http_probe = lambda *a, **k: {
+            "status": 403, "title": "403 Forbidden", "meta": "",
+            "credit_code": "", "refs": []}
+        cybercensus.tls_cert_info = lambda *a, **k: {
+            "org": "中国电信股份有限公司全渠道运营中心"}
+        self.addCleanup(cybercensus.__setattr__, "http_probe", orig_probe)
+        self.addCleanup(cybercensus.__setattr__, "tls_cert_info", orig_cert)
+        self.assertTrue(e._verify_candidate_domain("双流电信", "shuangliu.189.cn"))
+        self.assertIn("shuangliu.189.cn", e.domains)
+        self.assertNotIn("189.cn", e.domains)   # 集团根域不整体入锚点
+
+
+class TestDistrictCandidates(unittest.TestCase):
+    def test_extract_place(self):
+        self.assertEqual(cybercensus._extract_place("双流移动"), "双流")
+        self.assertEqual(cybercensus._extract_place("双流区电信"), "双流")
+        self.assertEqual(cybercensus._extract_place("某某市人民医院"), "某某人民医院")
+
+    @unittest.skipUnless(cybercensus.HAVE_PINYIN, "需要 pypinyin")
+    def test_pinyin_variants(self):
+        v = cybercensus._pinyin_variants("双流")
+        self.assertIn("shuangliu", v)
+        self.assertIn("sl", v)
+
+    def test_district_candidates_resolve_filter(self):
+        orig = cybercensus.resolve_a
+
+        def fake(h):
+            return {"1.1.1.1"} if h == "shuangliu.189.cn" else set()
+        cybercensus.resolve_a = fake
+        self.addCleanup(cybercensus.__setattr__, "resolve_a", orig)
+        out = cybercensus._district_candidates("双流电信")
+        self.assertEqual(out, ["shuangliu.189.cn"])
+
+    def test_non_operator_has_no_district_candidates(self):
+        self.assertEqual(cybercensus._district_candidates("双流人民医院"), [])
+
+
+class TestProviderKeywordTranslate(unittest.TestCase):
+    def test_fofa_body_search(self):
+        q = prov.Query("keyword", "双流移动")
+        p = prov.Fofa({"email": "a@b.com", "key": "k"})
+        self.assertIn('body="双流移动"', p.translate(q))
+
+    def test_hunter_body_search(self):
+        q = prov.Query("keyword", "双流移动")
+        p = prov.Hunter({"key": "k"})
+        self.assertIn('web.body="双流移动"', p.translate(q))
+
+
+class TestKeywordSearch(unittest.TestCase):
+    def test_build_queries_keyword_last(self):
+        qs = prov.build_queries({"x.com"}, set(), set(), set(),
+                                keywords=["双流移动", "", "a"])
+        kinds = [q.kind for q in qs]
+        self.assertEqual(kinds[-1], "keyword")
+        self.assertIn("双流移动", [q.value for q in qs])
+        self.assertNotIn("a", [q.value for q in qs])   # 太短被忽略
+
+    def test_search_result_urls(self):
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda url, **kw: (
+            '<h2><a href="https://sc.10086.cn/shuangliu">a</a></h2>'
+            '<h2><a href="https://www.bing.com/x">b</a></h2>')
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        urls = cybercensus.search_result_urls("双流移动")
+        self.assertEqual(urls, ["https://sc.10086.cn/shuangliu"])
+
+    def test_collect_keyword_leads_weak_anchor(self):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.names = ["双流移动"]
+        orig = cybercensus.search_result_urls
+
+        def fake(q):
+            if "site:" in q:
+                return []
+            return ["https://sc.10086.cn/shuangliu/index.html",
+                    "https://www.10086.cn/x",
+                    "https://news.example.com/a"]
+        cybercensus.search_result_urls = fake
+        self.addCleanup(cybercensus.__setattr__, "search_result_urls", orig)
+        e.collect_keyword_leads()
+        # 省级运营商域成为弱锚点（只进疑似）；www 根域不整体纳入
+        self.assertIn("sc.10086.cn", e.anchor["weak_domains"])
+        self.assertNotIn("10086.cn", e.anchor["domains"])
+        self.assertTrue(any("双流移动" in k for k, _ in e.risk_hints))
+        self.assertIn(("sc.10086.cn", "/shuangliu/index.html", "search"),
+                      e.web_paths)
+
+
 class TestReportFormats(unittest.TestCase):
     MD = ("# 标题\n\n- **确认**：某医院\n\n"
           "| 主机 | 端口 |\n|------|------|\n| www.x.com | 443 |\n")

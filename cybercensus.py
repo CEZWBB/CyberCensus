@@ -71,6 +71,13 @@ except Exception:
     prov_layer = None
     HAVE_PROVIDERS = False
 
+try:
+    from pypinyin import lazy_pinyin  # 区县/城市拼音候选（可选增强）
+    HAVE_PINYIN = True
+except Exception:
+    lazy_pinyin = None
+    HAVE_PINYIN = False
+
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -284,6 +291,69 @@ def _province_codes(name):
         if prov in name:
             return [c for c in codes if len(c) == 2]
     return []
+
+
+_PLACE_STRIP = (
+    "中国", "移动", "联通", "电信", "铁塔", "广电", "通信", "集团",
+    "股份有限公司", "有限责任公司", "有限公司", "分公司", "公司",
+    "营业厅", "服务厅", "分局", "管理局", "委员会", "省", "市", "区", "县",
+)
+
+
+def _extract_place(name):
+    """从短名里剥出区县/地名（双流移动 → 双流）。"""
+    s = name or ""
+    for w in _PLACE_STRIP:
+        s = s.replace(w, "")
+    s = s.strip()
+    return s if 2 <= len(s) <= 8 else ""
+
+
+def _pinyin_variants(place):
+    """地名 → 拼音全拼/首字母（双流 → shuangliu / sl）；无 pypinyin 时返回空。"""
+    if not HAVE_PINYIN or not place:
+        return []
+    try:
+        syl = [s for s in lazy_pinyin(place) if s]
+    except Exception:
+        return []
+    full = "".join(syl)
+    abbr = "".join(s[0] for s in syl if s)
+    out = []
+    for v in (full, abbr):
+        v = v.lower()
+        if v and v.isalnum() and v not in out:
+            out.append(v)
+    return out
+
+
+def _district_candidates(name):
+    """区县级运营商候选：双流电信 → shuangliu.189.cn / sl.189.cn。
+
+    只生成能通过 DNS 解析的候选（避免拿死域名浪费验证请求）；
+    仍要经过标题/证书互证，不会直接当资产。
+    """
+    prov, city, brand = _decode_region_brand(name)
+    if not brand:
+        return []
+    place = city or _extract_place(name)
+    if not place or place == prov:
+        return []
+    prov_codes = [c for c in PROVINCE_CODES.get(prov, ()) if len(c) == 2]
+    out = []
+    for py in _pinyin_variants(place)[:2]:
+        for root in OPERATOR_ROOTS.get(brand, ()):
+            cands = ["%s.%s" % (py, root)]
+            cands += ["%s.%s.%s" % (py, pc, root) for pc in prov_codes]
+            for h in cands:
+                if h in out:
+                    continue
+                try:
+                    if resolve_a(h):
+                        out.append(h)
+                except Exception:
+                    continue
+    return out[:8]
 
 
 def _gov_candidates(name):
@@ -1561,6 +1631,30 @@ def search_engine_lookup(name, timeout=15):
         return "", []
 
 
+def search_result_urls(query, timeout=15):
+    """搜索引擎结果的完整 URL 列表（关键词线索用，不只取域名）。
+
+    对应 FOFA/Hunter 的 title/body 内容检索：拿不到它们的资产库时，
+    至少把搜索引擎命中的页面列成人工可核查的线索。
+    """
+    urls = []
+    try:
+        url = ("https://cn.bing.com/search?q=" + urllib.parse.quote(query)
+               + "&count=20&mkt=zh-CN")
+        html = http_get(url, timeout=timeout, retries=1,
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        for m in re.finditer(r'<h2><a[^>]+href="(https?://[^"]+)"', html):
+            u = m.group(1).strip()
+            low = u.lower()
+            if "bing.com" in low or "microsoft.com" in low:
+                continue
+            if u not in urls:
+                urls.append(u)
+    except Exception:
+        pass
+    return urls
+
+
 def discover_domains_from_search(name, max_candidates=5, lookup=None):
     """从搜索引擎结果提取候选官网域名，返回 [(host, score), ...] 按分排序。
 
@@ -2393,9 +2487,10 @@ class Engine(object):
                         log("缩写变体搜索（%s）: %s"
                             % (v, ", ".join(d for d, _ in add_v)), "+")
                 # 运营商/省级政府：域名知识库直接补省级候选（不依赖搜索引擎）
+                district = _district_candidates(name)
                 fixed = list(dict.fromkeys(
                     _operator_candidates(name) + _gov_candidates(name)
-                    + list(self.intel.get("seed_domains") or [])))
+                    + district + list(self.intel.get("seed_domains") or [])))
                 if fixed:
                     have = {d for d, _ in cands}
                     add = [(d, 20) for d in fixed if d not in have]
@@ -2439,6 +2534,10 @@ class Engine(object):
                                 % ", ".join(d for d, _ in more), "!")
                 pool = picked or [d for d, _ in cands]
                 pool = [d for d in pool if _gov_candidate_allowed(name, d)]
+                # 区县拼音候选即使不带省份标签也要保留（双流电信 → shuangliu.189.cn）
+                for d in district:
+                    if d not in pool:
+                        pool.append(d)
                 if picked:
                     log("按省份缩写优先（%s）: %s"
                         % ("/".join(hints), ", ".join(picked)), "+")
@@ -2465,6 +2564,8 @@ class Engine(object):
                             self.domains.add(h)
                             self.anchor["weak_domains"].add(h)
                             added.append(h)
+                    if dom in district:
+                        self.add_asset(dom, None, None, source="seed:district")
                 if added:
                     log("纯被动模式：搜索引擎候选域名（未验证，结果只进疑似）: %s"
                         % ", ".join(added), "+")
@@ -2512,6 +2613,7 @@ class Engine(object):
                                                  lookup=lookup)
             fixed = list(dict.fromkeys(
                 _operator_candidates(name) + _gov_candidates(name)
+                + _district_candidates(name)
                 + list(self.intel.get("seed_domains") or [])))
             if fixed:
                 have = {d for d, _ in cands}
@@ -2558,6 +2660,11 @@ class Engine(object):
             return any(n and (_org_match(n, text) or _org_match_fuzzy(n, text))
                        for n in names)
 
+        brands = {_decode_region_brand(n)[2] for n in names}
+        brands.discard("")
+        root = root_domain(dom)
+        label = dom.split(".")[0].lower()
+
         for scheme, port in (("https", 443), ("http", 80)):
             info = http_probe(dom, port, scheme, timeout=self.args.timeout)
             if info.get("status") in ("", None):
@@ -2575,12 +2682,26 @@ class Engine(object):
             if info.get("credit_code") and info["credit_code"] in anchor_codes:
                 self._add_verified_domain(dom)
                 return True
+            # 运营商域名兜底：主机根域属于该运营商 + 页面/证书含运营商品牌。
+            # 用于区县级站点（双流电信 → shuangliu.189.cn，403 页面无标题，
+            # 但证书 O= 是中国电信）；仍要求根域与品牌严格对应。
+            if label not in ("www", "m") and brands:
+                for b in brands:
+                    if (root in OPERATOR_ROOTS.get(b, ())
+                            and b in page_text):
+                        self._add_verified_domain(dom)
+                        return True
             if scheme == "https":
                 cert = tls_cert_info(dom, port, timeout=self.args.timeout)
                 org = (cert or {}).get("org", "")
                 if org and _hit(org):
                     self._add_verified_domain(dom)
                     return True
+                if label not in ("www", "m") and org:
+                    for b in brands:
+                        if root in OPERATOR_ROOTS.get(b, ()) and b in org:
+                            self._add_verified_domain(dom)
+                            return True
         return False
 
     def _add_verified_domain(self, dom):
@@ -3114,9 +3235,19 @@ class Engine(object):
                     cidrs.append(str(ipaddress.ip_network(ip + "/24", strict=False)))
                 except Exception:
                     pass
+        kws = []
+        if getattr(self.args, "provider_keyword", False):
+            for n in list(self.names) + list(self.intel.get("aliases") or []):
+                if n and n not in kws:
+                    kws.append(n)
+            kws = kws[:6]
+            if kws:
+                log("平台关键词查询（title/body，仅作 C 级线索）: %s"
+                    % ", ".join(kws), "!")
         queries = prov_layer.build_queries(
             self.anchor["domains"], self.anchor["beian"], self.anchor["orgs"],
-            set(self.anchor["ips"]) | set(self.input_ips), cidrs)
+            set(self.anchor["ips"]) | set(self.input_ips), cidrs,
+            keywords=kws)
         log("平台聚合：%s | 查询 %d 条" % (",".join(sorted(provs)), len(queries)))
         recs, stats = prov_layer.run(
             provs, queries,
@@ -3325,6 +3456,12 @@ class Engine(object):
                     ev.append("C|平台公司名命中(同名风险)")
                     C += 1
 
+            if "keyword" in pk:
+                # 平台 title/body 关键词命中（如"双流移动"）只作线索：
+                # 可能只是页面提到该名称，不能作为归属证据
+                ev.append("C|平台关键词命中(待核)")
+                C += 1
+
             if nprov >= 2 and (pk & {"domain", "cert", "icp", "org"}):
                 ev.append("B|多平台交叉(%d)" % nprov)
                 B += 1
@@ -3460,6 +3597,65 @@ class Engine(object):
             log("基线保存失败: %s" % str(e)[:80], "!")
 
     # ---- 4.7 搜索引擎风险情报（dork，不触碰目标） ----
+    def collect_keyword_leads(self, max_queries=6):
+        """搜索引擎精确关键词线索（无平台 Key 时模拟内容检索）。
+
+        专门解决"双流移动 / 双流电信"这类**区县级短名**：本地没有
+        FOFA 那种资产库，但搜索引擎收录的页面里常有运营商省级域下的
+        具体页面。这里把命中 URL 作为线索列出，并把运营商集团域下的
+        省级主机（如 sc.10086.cn）当作**弱锚点**（结果只进疑似）。
+        """
+        names = [n for n in self.names if n][:4]
+        if not names:
+            return
+        roots = [d for d in sorted(self.anchor["domains"]) if d][:2]
+        queries = []
+        for n in names:
+            queries.append('"%s"' % n)
+            for r in roots:
+                if r and r not in n:
+                    queries.append("site:%s %s" % (r, n))
+        queries = list(dict.fromkeys(queries))[:max_queries]
+        if not queries:
+            return
+        log("关键词线索检索（搜索引擎内容命中，最多 %d 条查询）" % len(queries))
+        hits, added = 0, 0
+        for q in queries:
+            for u in search_result_urls(q):
+                host = _url_host(u)
+                if not host:
+                    continue
+                key = ("搜索命中｜%s" % q, u)
+                if key not in self.risk_hints:
+                    self.risk_hints.append(key)
+                    hits += 1
+                try:
+                    path = urllib.parse.urlsplit(u).path or ""
+                except Exception:
+                    path = ""
+                if path and path != "/":
+                    self.web_paths.add((host, path, "search"))
+                under = any(host == d or host.endswith("." + d)
+                            for d in self.anchor["domains"])
+                if under:
+                    self.add_asset(host, None, None, source="search:kw")
+                    added += 1
+                    continue
+                root = root_domain(host)
+                if root in OPERATOR_ROOT_DOMAINS:
+                    depth = host.count(".") - root.count(".")
+                    if depth >= 1 and not host.startswith(("www.", "m.")):
+                        if host not in self.anchor["domains"]:
+                            self.domains.add(host)
+                            self.anchor["domains"].add(host)
+                            self.anchor["weak_domains"].add(host)
+                            log("  搜索命中运营商省级域，作为弱锚点（只进疑似）: %s"
+                                % host, "+")
+                            added += 1
+        if hits:
+            log("关键词线索: %d 条搜索命中，%d 个主机进入台账（报告查看）"
+                % (hits, added), "+")
+
     def collect_risk_hints(self, max_domains=3):
         """对主体域名做搜索引擎 dork 情报收集（文档第9步：谷歌语法 + GitHub）。
 
@@ -5216,6 +5412,8 @@ def build_parser():
     g.add_argument("--config", default="config.json",
                    help="平台 Key 配置文件路径（默认 config.json，环境变量优先）")
     g.add_argument("--debug-provider", action="store_true", help="打印平台查询与错误详情")
+    g.add_argument("--provider-keyword", action="store_true", dest="provider_keyword",
+                   help="用平台 title/body 关键词检索短名（如“双流移动”），结果仅作疑似线索")
     g.add_argument("--verify", action="store_true",
                    help="被动模式下对疑似资产做一次 HTTP 复核（会触碰目标）")
     g.add_argument("--verify-limit", type=int, default=0,
@@ -5302,6 +5500,9 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
 
     eng.build_anchors(probe=not args.no_probe)
     if not _stopped():
+        # 区县级/非常规短名的内容线索（搜索引擎只读，不触碰目标）
+        if names and not getattr(args, "no_discover", False) and not fast:
+            eng.collect_keyword_leads()
         eng.collect_passive()
         # 搜索引擎风险情报（dork：后台入口 / GitHub 泄露，不触碰目标）
         if not getattr(args, "no_hints", False):

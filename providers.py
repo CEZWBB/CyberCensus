@@ -177,8 +177,12 @@ class Query(object):
         return "%s=%s" % (self.kind, self.value)
 
 
-def build_queries(domains, beians, orgs, ips, cidrs=None):
-    """生成高精度查询计划。顺序：强证据优先。"""
+def build_queries(domains, beians, orgs, ips, cidrs=None, keywords=()):
+    """生成高精度查询计划。顺序：强证据优先。
+
+    keywords 是可选的 title/body 关键词查询（如"双流移动"这种
+    平台内容检索场景）——结果只作为 C 级线索，不参与强证据判定。
+    """
     qs = []
     seen = set()
 
@@ -203,6 +207,10 @@ def build_queries(domains, beians, orgs, ips, cidrs=None):
         add("ip", ip)
     for c in sorted(set(cidrs or [])):
         add("cidr", c)
+    # 关键词放在最后：消耗配额、只产生 C 级线索，不能挤掉强证据查询
+    for kw in list(dict.fromkeys(k.strip() for k in (keywords or ()) if k and k.strip()))[:8]:
+        if 2 <= len(kw) <= 40:
+            add("keyword", kw)
     return qs
 
 

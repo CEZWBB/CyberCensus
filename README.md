@@ -31,8 +31,8 @@
 ### 给自己打包 exe（可选）
 
 ```bat
-pip install customtkinter dnspython cryptography pyinstaller
-pyinstaller --onefile --windowed --name CyberCensus --collect-all customtkinter asm_gui.pyw
+pip install customtkinter dnspython cryptography pypinyin pyinstaller
+pyinstaller --onefile --windowed --name CyberCensus --collect-all customtkinter --collect-all pypinyin asm_gui.pyw
 :: 产物在 dist\CyberCensus.exe；推送 v* 标签时 GitHub Actions 也会自动构建发布
 ```
 
@@ -69,7 +69,7 @@ pyinstaller --onefile --windowed --name CyberCensus --collect-all customtkinter 
 
 ```bat
 pip install pyinstaller
-pyinstaller --onefile --windowed --collect-all customtkinter asm_gui.pyw
+pyinstaller --onefile --windowed --collect-all customtkinter --collect-all pypinyin asm_gui.pyw
 :: 产物在 dist\asm_gui.exe
 ```
 
@@ -87,6 +87,8 @@ pyinstaller --onefile --windowed --collect-all customtkinter asm_gui.pyw
 | 官网自举 | 名称 → 搜索引擎找候选域名 → 探测首页 → 标题/证书 O=/信用代码互证 | 开 | `--no-discover` 关闭；纯被动模式只做候选不探测 |
 | 缩写变体 | `四川移动` ↔ `川移/蜀移/移动四川`；`川移` → `四川移动`；`蓉移` → `成都移动` | 开 | 完全离线生成，只当搜索词 |
 | 确定性种子 | 运营商省级入口（`wap.sc.10086.cn`）、省级政府（`www.sc.gov.cn`） | 开 | 名称含“省份+运营商/政府”时自动生成，仍要验证 |
+| 区县拼音候选 | `双流电信` → `shuangliu.189.cn / sl.189.cn`（只保留 DNS 可解析的） | 开 | 需 pypinyin（exe 已内置）；仍要证书/标题互证 |
+| 关键词线索 | 搜索引擎精确命中列线索；运营商省级域→弱锚点（只进疑似） | 开 | 极速模式跳过；结果在报告「风险线索」 |
 | 外部理解 intel | 外部模型/子 Agent 产出别名、查询词、候选域名 | 关 | `--intel intel.json` 或界面导入；见 `docs/agent-intel.md` |
 | 别名缓存 | 把 intel 用过的别名/种子沉淀下来，下次免准备 | 自动 | 同目录 `aliases.json`（不入库） |
 
@@ -112,6 +114,7 @@ pyinstaller --onefile --windowed --collect-all customtkinter asm_gui.pyw
 | 平台 | 能力 | 开关 |
 |------|------|------|
 | FOFA / 0.zone / Hunter 鹰图 / DayDayMap | 按 domain/cert/icp/org/ip/cidr 查询，结果并入台账 | `--providers`、`--no-providers` |
+| 平台关键词检索 | title/body 精确搜短名（如"双流移动"），结果仅 C 级疑似 | `--provider-keyword`（默认关，耗配额） |
 
 ### 4. 主动探测（需书面授权）
 
@@ -169,6 +172,7 @@ pyinstaller --onefile --windowed --collect-all customtkinter asm_gui.pyw
 ### 视目标启用（高价值，但有前提）
 
 - **平台 Key**：没有 Key 时，本地源对小单位通常只能找到主站；要历史资产、非标端口、IP 段，四家平台仍是最大增量。
+- **平台关键词检索（`--provider-keyword`）**：只有配了 Key、且目标是"双流移动"这类**区县级短名**时才建议开；它最接近 FOFA 的 title/body 搜索，但会消耗配额且结果只进疑似。
 - **主动模式 + 敏感路径**：只有拿到书面授权、且客户在意“泄露面”时才开；否则纯被动就够。
 - **APP/小程序包**：需要你手动拿到安装包；有包时价值很高（后台域名常不在 DNS 里）。
 - **外部工具**：本机装了才生效，适合愿意折腾的用户；不装不影响主体功能。
@@ -227,7 +231,7 @@ asm-tool\
 - Python 3.8+（推荐 3.10 / 3.11；`run.bat` 优先调用 `py -3.11`）
 - 可选但强烈建议：
   ```bash
-  pip install dnspython cryptography
+  pip install dnspython cryptography pypinyin
   ```
   - `cryptography`：读取证书 `O=` 组织名（A 级证据，建议一定装）
   - `dnspython`：DNS 记录更准更快（不装会退回 nslookup）
@@ -333,6 +337,7 @@ run.bat -d xx.gov.cn
 | `--no-providers` | 不调用任何测绘平台，只跑本地被动采集 |
 | `--config` | 平台 Key 配置文件路径，默认 `config.json` |
 | `--debug-provider` | 打印平台查询语句与错误详情 |
+| `--provider-keyword` | 用平台 title/body 关键词检索短名（如"双流移动"），结果仅作疑似线索 |
 | `--no-brute` | 禁用 45 个常见子域的 DNS 小字典 |
 | `--no-hints` | 不做搜索引擎 dork 风险情报 |
 | `--no-apps` | 不查 App Store |
@@ -539,6 +544,11 @@ source, evidence, reject_reason, urls, plain
 28. **外部模型 / 子 Agent 名称理解接口（`--intel` / 界面"理解结果JSON"）**：不内置小模型。你（或任意模型/子 Agent）把单位名理解成结构化 JSON，扫描器消费：`aliases`（别名，加入名称互证）、`queries`（补充搜索词）、`seed_domains`（候选域名，**仍需标题/证书验证**）。模型只提供"理解与查询计划"，不判定资产归属；文件缺失/格式错误自动回退规则逻辑。提示词与契约见 [`docs/agent-intel.md`](docs/agent-intel.md)。**intel 不是必需品**：扫描器会自动生成缩写变体（四川移动 ↔ 川移/蜀移/移动四川；川移 → 四川移动/川移动；蓉移 → 成都移动），并把历次 intel 的别名/种子域沉淀到同目录 `aliases.json`，下次无需再准备 JSON。
 29. **极速模式（`--fast` / 界面"高级参数 → 极速模式"）**：网络测绘的瓶颈是 RTT、DNS/HTTP 往返和平台限速，**不是算力——GPU 对 DNS/TCP/TLS/HTTP 没有加速作用**，所以本工具不提供点了没效果的"GPU 加速"开关。极速模式用真实的取舍换速度：跳过 DNS 小字典、搜索引擎情报、公众号文章、JS 深挖，连接超时 1.2s、并发 ≥50、候选验证 ≤4 个、subfinder 单域 ≤1000；覆盖会下降，正式交付的测绘建议关闭。若你用 Ollama 等本地模型生成 intel，GPU 加速在模型侧（Ollama 设置）启用，与本工具的扫描过程无关。
 30. **路径 / 接口线索采集（不靠大字典）**：`--no-paths` 关闭、`--path-limit` 上限（默认 30 个 Web 资产）、界面高级参数开关。四个来源：① `robots.txt` 的 Allow/Disallow（运维最不想被看到的目录常在这里）；② `sitemap.xml` 的 `<loc>`；③ 前端 JS 里的 `"/api/..."`、`"/admin/..."` 等接口/目录字面量（自动过滤图片/脚本等静态资源）；④ **Wayback CDX 历史 URL 路径**（纯第三方数据，历史下线/未公开的目录常留在这里）。结果单列报告「🔎 路径/接口线索」，标注 `robots / sitemap / js / wayback` 来源，**不逐个探测每个路径**（避免打草惊蛇和大流量）；robots/sitemap 需主动 GET，`--no-probe` 下跳过；Wayback 纯被动，极速模式才跳过。这些路径本身就是暴露面线索，可交给人工做未授权访问/敏感文件核查（仅在授权范围内）。
+31. **区县级短名（双流移动 / 双流电信）支持**：FOFA/Hunter 的核心能力是**内容检索库**（按 title/body 搜），这是本地工具没有的数据源。为此补了三条路径：
+    - **有平台 Key**：`--provider-keyword`（界面「高级参数 → 平台关键词检索」）把输入短名翻译成 `body="双流移动"`（FOFA）/`web.body=`（Hunter/DayDayMap），结果只算 **C 级线索**（进"疑似"，不进"确认"）；这是最接近 FOFA 的用法，但会消耗平台配额。
+    - **无 Key 的拼音候选**：从短名提取地名 + 运营商品牌，生成 `shuangliu.189.cn / sl.189.cn` 这类候选，**只保留 DNS 可解析的**，再走证书/标题互证（需 `pip install pypinyin`；exe 已内置）。实测"双流电信"确认 92 / 疑似 132；"双流移动"对应的 `shuangliu.10086.cn` 不存在，因此不会硬造结果。
+    - **搜索引擎关键词线索**：精确命中 URL 列入报告「风险线索」，运营商集团域下的省级主机（如 `sc.10086.cn`）降级为**弱锚点**（只进疑似）；命中页面路径同时进「路径/接口线索」。
+    > 诚实边界：如果某条资产只是 `sc.10086.cn` 下某个页面提到"双流移动"，它没有独立 DNS 名，**没有平台 Key / 内容库就无法发现**——这是数据源差距，模糊匹配解决不了。
 
 ## 平台配额与频率（重要）
 

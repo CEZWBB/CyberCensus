@@ -147,7 +147,8 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
                cscan=False, top=0, ports="", full_ports=False,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
                formats=None, sensitive=None, probe_interval=0.0, webhook="",
-               ext=True, packages=None, intel="", fast=False, paths=True):
+               ext=True, packages=None, intel="", fast=False, paths=True,
+               provider_keyword=False):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
@@ -196,6 +197,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         fast=bool(fast),
         no_paths=not bool(paths),
         path_limit=30,
+        provider_keyword=bool(provider_keyword),
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
@@ -633,7 +635,7 @@ class App(ctk.CTk):
     def _build_advanced_dialog(self):
         win = ctk.CTkToplevel(self)
         win.title("高级参数 · CyberCensus")
-        win.geometry("800x540")
+        win.geometry("820x580")
         win.configure(fg_color=BG)
         win.withdraw()
         win.protocol("WM_DELETE_WINDOW", win.withdraw)
@@ -730,6 +732,12 @@ class App(ctk.CTk):
         ctk.CTkSwitch(f, text="采集路径线索：robots.txt / sitemap.xml / 前端 JS API（主动 GET）",
                       variable=self.var_paths, progress_color=ACCENT
                       ).grid(row=8, column=0, columnspan=6, sticky="w",
+                             padx=(14, 0), pady=(0, 4))
+
+        self.var_pkw = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(f, text="平台关键词检索：title/body 搜短名（如“双流移动”，仅疑似线索）",
+                      variable=self.var_pkw, progress_color=ORANGE
+                      ).grid(row=9, column=0, columnspan=6, sticky="w",
                              padx=(14, 0), pady=(0, 10))
 
         ctk.CTkLabel(win, text="提示：平台翻页越多越慢、越费配额；全端口扫描建议仅在授权窗口期使用。",
@@ -995,6 +1003,7 @@ class App(ctk.CTk):
             intel=self.var_intel.get().strip(),
             fast=self.var_fast.get(),
             paths=self.var_paths.get(),
+            provider_keyword=self.var_pkw.get(),
         )
         self._last_out_dir = args.out
 
