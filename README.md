@@ -71,7 +71,7 @@ pyinstaller --onefile --windowed --name CyberCensus --collect-all customtkinter 
 - 目标框里填 **单位名称 / 域名 / IP / 网段**（可多个，空格或逗号分隔），输入时实时显示识别结果
 - **四种模式做成选择卡片**（纯被动 / 标准 / 复核 / 主动），每张卡直接标出该模式会用到哪些能力；选中后顶部代号、主按钮、进度条、标签页同步换色（青→蓝→黄→红），主动模式还要求勾选书面授权
 - 卡片下方是**能力矩阵**：被动源 / subfinder / httpx / wafw00f / 端口扫描 / nuclei 逐项亮灭，一眼看出当前模式跑什么
-- 左侧栏"增强引擎"实时显示四个引擎的 READY / MISSING 状态（免安装包里的 `tools\` 会被自动识别）；平台开关按已配置的 Key 自动启用
+- 左侧栏"增强引擎"实时显示四个引擎的 READY / MISSING 状态（免安装包里的 `tools\` 会被自动识别）；下方 **「⟳ 检查 / 更新增强引擎」** 可对比官方最新版并一键升级（下载 → 版本校验 → 备份 → 原子替换，失败自动回滚），同时可更新 nuclei 模板；平台开关按已配置的 Key 自动启用
 - 运行时**进度条显示百分比 + 预计剩余时间**（按已完成阶段的实际耗时平滑估算，阶段越往后越准），日志彩色实时滚动（青=阶段 / 绿=命中 / 黄=警告）
 - **扫描不自动写报告**：完成后结果直接进"资产列表"表格（分类/主机/IP/端口/标题/白话归属说明，按确认→疑似→存疑着色排序），先在界面里看
 - 满意后再点 **⬇ 生成报告…** 按需选择导出格式（网页 HTML / PDF / Word DOCX / 纯文本 TXT / Markdown MD / 资产台账 CSV / 原始数据 JSON），对话框内每种格式都有一句话用途说明；保存位置可改
@@ -387,6 +387,8 @@ run.bat -d xx.gov.cn
 | `--ext-tools` | 只调用指定外部工具：`subfinder,httpx,wafw00f,nuclei` |
 | `--no-ext` | 不调用任何外部工具 |
 | `--ext-sub-limit` | subfinder 单域名子域上限，默认 3000（0=不限） |
+| `--check-engines` | 只检查增强引擎版本（对比 ProjectDiscovery 官方最新版）后退出 |
+| `--update-engines` | 下载升级增强引擎 + nuclei 模板后退出（等价于界面「更新引擎」按钮） |
 
 ### 运行与输出
 
@@ -589,6 +591,13 @@ emails, phones, authorities, refs, site_code, police_beian
     - **纯被动约束**：英文搜索候选在 `--no-probe` 下必须通过 RDAP 注册人互证才会成为弱锚点，否则直接丢弃——避免把 `gov.uk`、`britannica.com` 这类搜索结果里的百科/政府/媒体站点带进台账。
     - **网络可达性**：DuckDuckGo / Mojeek / Wikidata 在部分网络环境（尤其中国大陆出口）不可达，Bing 也可能按 IP 地域返回中文结果；此时国际名称自举会降级。国外使用者或具备国际出口的环境效果最好，也可以直接 `-d 已知域名` 或 `--intel` 提供 seed_domains。
     - **诚实边界**：RDAP 注册人普遍隐私化、ASN 多为云厂商、统计 ID 可能由外包机构共用——这些都需要 A 级或两条 B 级才进"确认"，不会单凭一条线索误判。纯国内目标不会额外发起 RDAP/ASN 请求（按名称自动判断）。
+
+33. **增强引擎在线更新（界面按钮 / `--update-engines`）**：subfinder、httpx、nuclei 都由 ProjectDiscovery 持续维护，工具会查 GitHub Releases 最新版并与本地 `-version` 对比：
+    - **一键更新**：下载官方 `*_windows_amd64.zip` → 解压 → 运行新 exe 校验版本 → 备份旧版 → 原子替换；替换失败/新版本跑不起来会自动回滚（临时文件与目标不同盘时先复制到同盘再替换）。
+    - **镜像回退**：直连 GitHub 失败时自动尝试 `gh-proxy.com` / `ghproxy.net`，适合国内网络。
+    - **模板更新**：调用 `nuclei -update-templates`；发布包存在 `nuclei-templates\` 时用 `-ud` 更新包内那一份。
+    - **wafw00f**：官方没有 Windows 单文件发行版，随 CyberCensus 发布包冻结更新；检查时只显示 PyPI 是否有新版本，不会破坏现有 exe。
+    - 更新前请确保扫描已结束（界面在扫描中会禁用按钮）；更新只替换 `tools\` 下的文件，不影响台账和报告。
 
 ## 平台配额与频率（重要）
 

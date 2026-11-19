@@ -6804,6 +6804,10 @@ def build_parser():
                    help="不调用任何外部工具（默认自动探测并调用）")
     g.add_argument("--ext-sub-limit", type=int, default=3000, dest="ext_sub_limit",
                    help="subfinder 单域名子域上限（默认3000，0=不限；防止历史垃圾子域撑爆台账）")
+    g.add_argument("--check-engines", action="store_true", dest="check_engines",
+                   help="只检查增强引擎版本（对比 ProjectDiscovery 官方最新版）后退出")
+    g.add_argument("--update-engines", action="store_true", dest="update_engines",
+                   help="下载并升级增强引擎 + nuclei 模板后退出（与界面「更新引擎」按钮等价）")
 
     g = p.add_argument_group("多平台聚合（FOFA / 0.zone / Hunter鹰图 / DayDayMap）")
     g.add_argument("--providers", action="append", default=None,
@@ -7018,6 +7022,24 @@ def main():
         sys.stderr.reconfigure(errors="replace")
     except Exception:
         pass
+
+    # 引擎检查/升级是独立动作，不需要目标
+    if getattr(args, "check_engines", False) or getattr(args, "update_engines", False):
+        import tool_updater
+        base = _base_dir()
+        if getattr(args, "check_engines", False):
+            for r in tool_updater.check_updates(base):
+                cur = r.get("current") or "未安装"
+                latest = r.get("latest") or "?"
+                flag = "可更新" if r.get("updatable") else (
+                    r.get("note") or "已是最新")
+                print("  %-10s 当前 %-10s 最新 %-10s %s"
+                      % (r["name"], cur, latest, flag))
+        else:
+            for name, ok, msg in tool_updater.update_all(
+                    base, log=lambda m: print("  " + str(m))):
+                print("  [%s] %s: %s" % ("OK" if ok else "FAIL", name, msg))
+        return 0
 
     names = list(args.name)
     domains = set(d.strip().lower() for d in args.domain if d.strip())

@@ -37,6 +37,7 @@ sys.path.insert(0, BASE_DIR)
 
 import cybercensus                # noqa: E402
 import providers as prov_layer  # noqa: E402
+import tool_updater               # noqa: E402
 
 try:
     import customtkinter as ctk
@@ -368,24 +369,30 @@ class App(ctk.CTk):
         card3 = ctk.CTkFrame(sb, corner_radius=10, fg_color=CARD,
                              border_width=1, border_color=STROKE)
         card3.pack(fill="x", padx=14)
-        try:
-            avail = set(cybercensus.ext_available())
-        except Exception:
-            avail = set()
+        self._engine_rows = {}
         for name in ("subfinder", "httpx", "wafw00f", "nuclei"):
             row = ctk.CTkFrame(card3, fg_color="transparent")
             row.pack(fill="x", padx=14, pady=2)
-            on = name in avail
-            ctk.CTkLabel(row, text="●" if on else "○", font=self.f_mono_sm,
-                         text_color=GREEN if on else "#3d5064"
-                         ).pack(side="left")
-            ctk.CTkLabel(row, text=name, font=self.f_mono,
-                         text_color=TEXT if on else GRAY).pack(side="left", padx=(7, 0))
-            ctk.CTkLabel(row, text="READY" if on else "MISSING", font=self.f_mono_sm,
-                         text_color=GREEN if on else "#3d5064").pack(side="right")
+            dot = ctk.CTkLabel(row, text="○", font=self.f_mono_sm,
+                               text_color="#3d5064")
+            dot.pack(side="left")
+            nm = ctk.CTkLabel(row, text=name, font=self.f_mono,
+                              text_color=GRAY)
+            nm.pack(side="left", padx=(7, 0))
+            st = ctk.CTkLabel(row, text="MISSING", font=self.f_mono_sm,
+                              text_color="#3d5064")
+            st.pack(side="right")
+            self._engine_rows[name] = (dot, nm, st)
+        self._refresh_engine_rows()
         ctk.CTkLabel(card3, text="未安装的引擎自动跳过（纯被动仅 subfinder）",
                      text_color=GRAY, font=self.f_mono_sm, wraplength=220,
-                     justify="left").pack(anchor="w", padx=14, pady=(6, 12))
+                     justify="left").pack(anchor="w", padx=14, pady=(6, 4))
+        self.btn_update_tools = ctk.CTkButton(
+            card3, text="⟳  检查 / 更新增强引擎", height=30, corner_radius=7,
+            fg_color="transparent", border_width=1, border_color=STROKE,
+            hover_color=CARD_HI, text_color=ACCENT, font=self.f_mono_sm,
+            command=self._open_engine_updater)
+        self.btn_update_tools.pack(fill="x", padx=12, pady=(0, 12))
 
         # ---- 操作 ----
         self._section(sb, "// 03  CONFIG  ·  配置")
@@ -415,6 +422,158 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     # 主工作区
     # ------------------------------------------------------------------
+    def _refresh_engine_rows(self):
+        try:
+            avail = set(cybercensus.ext_available())
+        except Exception:
+            avail = set()
+        for name, (dot, nm, st) in getattr(self, "_engine_rows", {}).items():
+            on = name in avail
+            dot.configure(text="●" if on else "○",
+                          text_color=GREEN if on else "#3d5064")
+            nm.configure(text_color=TEXT if on else GRAY)
+            st.configure(text="READY" if on else "MISSING",
+                         text_color=GREEN if on else "#3d5064")
+
+    # ------------------------------------------------------------------
+    # 增强引擎检查 / 更新
+    # ------------------------------------------------------------------
+    def _open_engine_updater(self):
+        if self._worker and self._worker.is_alive():
+            messagebox.showwarning("正在扫描", "扫描进行中，结束后再更新引擎。")
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("增强引擎 · 检查 / 更新")
+        win.geometry("780x580")
+        win.configure(fg_color=BG)
+        win.transient(self)
+        win.after(300, lambda: win.grab_set())
+        ctk.CTkLabel(win, text="// ENGINE UPDATE  ·  官方 Release 自动升级",
+                     font=self.f_mono, text_color=ACCENT).pack(
+                         anchor="w", padx=18, pady=(14, 2))
+        ctk.CTkLabel(
+            win, text="subfinder / httpx / nuclei 来自 ProjectDiscovery 官方；"
+                      "wafw00f 随发布包更新。下载失败会自动尝试镜像。",
+            font=self.f_mono_sm, text_color=GRAY, anchor="w",
+            wraplength=730, justify="left").pack(anchor="w", padx=18)
+        txt = ctk.CTkTextbox(win, fg_color="#08101c", text_color=TEXT,
+                             font=self.f_mono_sm, corner_radius=8,
+                             border_width=1, border_color=STROKE)
+        txt.pack(fill="both", expand=True, padx=18, pady=(10, 8))
+        txt.insert("end", "点击「检查更新」查看本地版本与官方最新版本。\n")
+
+        row = ctk.CTkFrame(win, fg_color="transparent")
+        row.pack(fill="x", padx=18, pady=(0, 14))
+        q = queue.Queue()
+        busy = {"v": False}
+
+        def out(msg):
+            q.put(("log", str(msg)))
+
+        def poll():
+            try:
+                while True:
+                    kind, val = q.get_nowait()
+                    if kind == "log":
+                        txt.insert("end", val + "\n")
+                        txt.see("end")
+                    elif kind == "busy":
+                        busy["v"] = bool(val)
+                        state = "disabled" if val else "normal"
+                        for b in (btn_check, btn_update, btn_tpl):
+                            b.configure(state=state)
+                    elif kind == "refresh":
+                        self._refresh_engine_rows()
+            except queue.Empty:
+                pass
+            try:
+                if win.winfo_exists():
+                    win.after(120, poll)
+            except Exception:
+                pass
+
+        def run_job(fn):
+            if busy["v"]:
+                return
+            busy["v"] = True
+            q.put(("busy", True))
+
+            def _job():
+                try:
+                    fn()
+                except Exception as e:
+                    out("错误: %s" % str(e)[:300])
+                finally:
+                    q.put(("busy", False))
+                    q.put(("refresh", True))
+            threading.Thread(target=_job, daemon=True).start()
+
+        def check():
+            out("== 检查更新 ==")
+            out("（访问 GitHub API，可能需要几秒…）")
+
+            def _fn():
+                rows = tool_updater.check_updates(BASE_DIR)
+                for r in rows:
+                    name = r["name"]
+                    cur = r.get("current") or "未安装"
+                    latest = r.get("latest") or "?"
+                    if name == "wafw00f":
+                        out("  %-10s 当前 %-9s 最新 %-9s  %s"
+                            % (name, cur, latest, r.get("note", "")))
+                    elif r.get("updatable"):
+                        out("  %-10s 当前 %-9s 最新 %-9s  ↑ 可更新"
+                            % (name, cur, latest))
+                    else:
+                        out("  %-10s 当前 %-9s 最新 %-9s  已是最新"
+                            % (name, cur, latest))
+            run_job(_fn)
+
+        def update_all():
+            out("== 一键更新（下载→版本校验→备份→替换）==")
+
+            def _fn():
+                res = tool_updater.update_all(
+                    BASE_DIR, log=out,
+                    progress=lambda p, t: out("[%3d%%] %s" % (p, t)))
+                for name, ok, msg in res:
+                    out(("  [OK] " if ok else "  [FAIL] ") + "%s: %s" % (name, msg))
+                out("更新结束。右侧引擎状态已刷新。")
+            run_job(_fn)
+
+        def update_tpl():
+            out("== 更新 nuclei 模板 ==")
+
+            def _fn():
+                ok, msg = tool_updater.update_templates(BASE_DIR, log=out)
+                out(("  [OK] " if ok else "  [FAIL] ") + msg)
+            run_job(_fn)
+
+        btn_check = ctk.CTkButton(row, text="检查更新", width=110, height=32,
+                                  corner_radius=8, fg_color=ACCENT,
+                                  text_color="#04141a", hover_color=ACCENT_HOVER,
+                                  command=check, font=self.f_body)
+        btn_check.pack(side="left")
+        btn_update = ctk.CTkButton(row, text="一键更新", width=110, height=32,
+                                   corner_radius=8, fg_color="transparent",
+                                   border_width=1, border_color=ACCENT,
+                                   text_color=ACCENT, hover_color=CARD_HI,
+                                   command=update_all, font=self.f_body)
+        btn_update.pack(side="left", padx=(10, 0))
+        btn_tpl = ctk.CTkButton(row, text="更新模板", width=110, height=32,
+                                corner_radius=8, fg_color="transparent",
+                                border_width=1, border_color=STROKE,
+                                text_color=TEXT, hover_color=CARD_HI,
+                                command=update_tpl, font=self.f_body)
+        btn_tpl.pack(side="left", padx=(10, 0))
+        ctk.CTkButton(row, text="关闭", width=80, height=32, corner_radius=8,
+                      fg_color="transparent", border_width=1, border_color=STROKE,
+                      text_color=GRAY, hover_color=CARD_HI,
+                      command=win.destroy, font=self.f_body
+                      ).pack(side="right")
+        win.after(120, poll)
+        win.after(400, check)
+
     def _build_main(self):
         m = ctk.CTkFrame(self, fg_color="transparent")
         m.grid(row=1, column=1, sticky="nsew", padx=20, pady=16)
@@ -1069,6 +1228,8 @@ class App(ctk.CTk):
     def _set_running(self, running):
         self.btn_start.configure(state="disabled" if running else "normal")
         self.btn_stop.configure(state="normal" if running else "disabled")
+        if hasattr(self, "btn_update_tools"):
+            self.btn_update_tools.configure(state="disabled" if running else "normal")
         if running:
             self._set_status("● 运行中", ORANGE)
         else:
