@@ -150,7 +150,7 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
                out="cybercensus_out", config=CONFIG_PATH, debug_provider=False,
                formats=None, sensitive=None, probe_interval=0.0, webhook="",
                ext=True, packages=None, intel="", fast=False, paths=True,
-               provider_keyword=False):
+               provider_keyword=False, asn="", scan_asn=False, watch=0):
     """由界面选择构造 argparse.Namespace（与 CLI 参数一一对应）。
 
     mode: passive / standard / verify / active
@@ -159,6 +159,8 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
     ext: 调用本机已安装的外部工具（subfinder/httpx/wafw00f/nuclei）
     """
     active = (mode == "active")
+    if scan_asn:
+        active = True   # 扫描 ASN 网段属于主动行为
     if sensitive is None:
         sensitive = active
     args = argparse.Namespace(
@@ -200,6 +202,9 @@ def build_args(mode, platforms, threads=20, provider_pages=1,
         no_paths=not bool(paths),
         path_limit=30,
         provider_keyword=bool(provider_keyword),
+        asn=[x.strip() for x in re.split(r"[,;\s]+", asn or "") if x.strip()],
+        scan_asn=bool(scan_asn),
+        watch=max(0, int(watch or 0)),
         yes=True,   # 授权确认由界面勾选框承担，不再走 input()
     )
     # 端口列表（与 CLI main 相同的优先级：自定义 > top > 内置全表）
@@ -275,6 +280,8 @@ class App(ctk.CTk):
         self._last_engine = None
         self._scan_start = 0.0
         self._eta = None
+        self._auto_timer = None
+        self._last_watch = 0
         self._prog_samples = []      # [(time, pct), ...] 用于按最近速率估算
         self._eta_samples = []       # 最近的原始 ETA，取中位数抗抖动
         self._last_prog_time = 0.0
@@ -823,7 +830,7 @@ class App(ctk.CTk):
     def _build_advanced_dialog(self):
         win = ctk.CTkToplevel(self)
         win.title("高级参数 · CyberCensus")
-        win.geometry("820x580")
+        win.geometry("820x650")
         win.configure(fg_color=BG)
         win.withdraw()
         win.protocol("WM_DELETE_WINDOW", win.withdraw)
@@ -926,7 +933,27 @@ class App(ctk.CTk):
         ctk.CTkSwitch(f, text="平台关键词检索：title/body 搜短名（如“双流移动”，仅疑似线索）",
                       variable=self.var_pkw, progress_color=ORANGE
                       ).grid(row=9, column=0, columnspan=6, sticky="w",
-                             padx=(14, 0), pady=(0, 10))
+                             padx=(14, 0), pady=(0, 6))
+
+        ctk.CTkLabel(f, text="目标 ASN").grid(row=10, column=0, sticky="e",
+                                              padx=(14, 4), pady=4)
+        self.var_asn = ctk.StringVar(value="")
+        ctk.CTkEntry(f, textvariable=self.var_asn,
+                     placeholder_text="AS12345（可多个，逗号分隔）；只列宣告网段作线索"
+                     ).grid(row=10, column=1, columnspan=3, sticky="we", padx=(0, 6))
+        self.var_scan_asn = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(f, text="扫描这些网段（授权！上限 4096 IP）",
+                      variable=self.var_scan_asn, progress_color=RED
+                      ).grid(row=10, column=4, columnspan=2, sticky="w", padx=(0, 10))
+
+        ctk.CTkLabel(f, text="持续监控").grid(row=11, column=0, sticky="e",
+                                              padx=(14, 4), pady=(4, 10))
+        self.var_watch = ctk.StringVar(value="0")
+        ctk.CTkEntry(f, textvariable=self.var_watch, width=80,
+                     placeholder_text="0").grid(row=11, column=1, sticky="w")
+        ctk.CTkLabel(f, text="分钟；0=关闭。每轮扫描结束自动重扫并对比基线（Ctrl+C/关闭窗口停止）",
+                     font=self.f_mono_sm, text_color=GRAY
+                     ).grid(row=11, column=2, columnspan=4, sticky="w", padx=(0, 10))
 
         ctk.CTkLabel(win, text="提示：平台翻页越多越慢、越费配额；全端口扫描建议仅在授权窗口期使用。",
                      font=self.f_mono_sm, text_color=GRAY
@@ -1337,6 +1364,9 @@ class App(ctk.CTk):
         if self.var_fullports.get():
             if not messagebox.askyesno("全端口确认", "全端口 1-65535 非常慢，确定继续？"):
                 return
+        if self.var_scan_asn.get() and not self.var_auth.get():
+            messagebox.showwarning("需要授权", "扫描 ASN 网段属于主动行为，请先勾选书面授权确认。")
+            return
         platforms = [n for n, v in self.var_platforms.items() if v.get()]
         packages = [p.strip() for p in re.split(r"[;\n]+", self.var_packages.get())
                     if p.strip()]
@@ -1360,8 +1390,18 @@ class App(ctk.CTk):
             fast=self.var_fast.get(),
             paths=self.var_paths.get(),
             provider_keyword=self.var_pkw.get(),
+            asn=self.var_asn.get().strip(),
+            scan_asn=self.var_scan_asn.get(),
+            watch=_to_int(self.var_watch.get(), 0),
         )
         self._last_out_dir = args.out
+        self._last_watch = max(0, int(getattr(args, "watch", 0) or 0))
+        if getattr(self, "_auto_timer", None):
+            try:
+                self.after_cancel(self._auto_timer)
+            except Exception:
+                pass
+            self._auto_timer = None
 
         # 重置界面状态
         self.txt_log.configure(state="normal")
@@ -1416,7 +1456,26 @@ class App(ctk.CTk):
         except Exception:
             self._queue.put(("error", traceback.format_exc()))
 
+    def _auto_restart(self):
+        self._auto_timer = None
+        if self._worker and self._worker.is_alive():
+            return
+        try:
+            self._append_log("持续监控：自动开始下一轮扫描…", "#")
+            self._on_start()
+        except Exception:
+            pass
+
     def _on_stop(self):
+        if self._auto_timer:
+            try:
+                self.after_cancel(self._auto_timer)
+            except Exception:
+                pass
+            self._auto_timer = None
+            self.btn_stop.configure(state="disabled", text="⏹ 停止并输出")
+            self._append_log("已取消持续监控（本次结果保留）。", "!")
+            return
         if not (self._worker and self._worker.is_alive()):
             return
         self._stop_flag.set()
@@ -1425,7 +1484,8 @@ class App(ctk.CTk):
 
     def _set_running(self, running):
         self.btn_start.configure(state="disabled" if running else "normal")
-        self.btn_stop.configure(state="normal" if running else "disabled")
+        self.btn_stop.configure(state="normal" if running else "disabled",
+                                text="⏹ 停止并输出")
         if hasattr(self, "btn_update_tools"):
             self.btn_update_tools.configure(state="disabled" if running else "normal")
         if running:
@@ -1543,6 +1603,13 @@ class App(ctk.CTk):
         self._append_log("=" * 60, "#")
         self._append_log("完成：确认 %d | 疑似 %d | 剔除 %d | 合计 %d"
                          % (counts["确认"], counts["疑似"], counts["存疑"], len(eng.assets)), "#")
+        if (self._last_watch and not self._stop_flag.is_set()
+                and self.winfo_exists()):
+            ms = self._last_watch * 60 * 1000
+            self._auto_timer = self.after(ms, self._auto_restart)
+            self.btn_stop.configure(state="normal", text="⏹ 停止监控")
+            self._append_log("持续监控：%d 分钟后自动进行下一轮（点「停止监控」或关闭窗口可停止）"
+                             % self._last_watch, "#")
         extra = []
         if getattr(eng, "apps", None):
             extra.append("APP %d 个" % len(eng.apps))
@@ -1731,6 +1798,11 @@ class App(ctk.CTk):
                 return
         cybercensus.LOG_HOOK = None
         self._stop_flag.set()
+        if self._auto_timer:
+            try:
+                self.after_cancel(self._auto_timer)
+            except Exception:
+                pass
         self.destroy()
 
 

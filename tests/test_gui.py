@@ -164,6 +164,18 @@ class TestBuildArgs(unittest.TestCase):
         args = gui.build_args("standard", [], ext=False)
         self.assertTrue(args.no_ext)
 
+    def test_asn_and_watch_passthrough(self):
+        args = gui.build_args("standard", [], asn="AS64500, AS64501",
+                              scan_asn=True, watch=30)
+        self.assertEqual(args.asn, ["AS64500", "AS64501"])
+        self.assertTrue(args.scan_asn)
+        self.assertTrue(args.active)   # 扫描 ASN 隐含主动
+        self.assertEqual(args.watch, 30)
+        args = gui.build_args("standard", [])
+        self.assertEqual(args.asn, [])
+        self.assertFalse(args.scan_asn)
+        self.assertEqual(args.watch, 0)
+
     def test_ports_priority(self):
         args = gui.build_args("standard", [], top=5)
         self.assertEqual(args.ports_list, list(gui.cybercensus.DEFAULT_PORTS[:5]))

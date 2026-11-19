@@ -2480,5 +2480,114 @@ class TestIntlEvidenceGrading(unittest.TestCase):
         self.assertTrue(any(x.startswith("A|自有ASN") for x in a.evidence))
 
 
+class TestPassivePivots(unittest.TestCase):
+    def test_extract_verify_tokens_dns_and_meta(self):
+        txt = ("v=spf1 include:sendgrid.net ~all "
+               "google-site-verification=abcDEF1234567890 "
+               "msvalidate.01=0123456789ABCDEF")
+        out = cybercensus.extract_verify_tokens(txt)
+        self.assertIn("google:abcDEF1234567890", out)
+        self.assertIn("bing:0123456789ABCDEF", out)
+        html = ('<meta name="facebook-domain-verification" '
+                'content="abcdef123456">')
+        self.assertIn("facebook:abcdef123456",
+                      cybercensus.extract_verify_tokens(html))
+
+    def test_crt_sibling_domains(self):
+        data = [
+            {"serial_number": "1",
+             "name_value": "www.acme.com\napi.acme.com\nacme-cdn.net"},
+            {"serial_number": "2",
+             "name_value": "unrelated.org\ngoogle.com"},
+        ]
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda *a, **k: json.dumps(data)
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        out = cybercensus.crt_sibling_domains("acme.com")
+        self.assertIn("acme-cdn.net", out)
+        self.assertNotIn("unrelated.org", out)
+        self.assertNotIn("google.com", out)
+
+    def test_asn_prefixes_parse(self):
+        data = {"data": {"prefixes": [
+            {"prefix": "203.0.113.0/24"}, {"prefix": "2001:db8::/32"}]}}
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda *a, **k: json.dumps(data)
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        out = cybercensus.asn_prefixes("AS64500")
+        self.assertEqual(out, ["203.0.113.0/24", "2001:db8::/32"])
+
+    def test_expand_asn_scope(self):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        orig = cybercensus.asn_prefixes
+        cybercensus.asn_prefixes = lambda asn, timeout=20: [
+            "203.0.113.0/30", "2001:db8::/32"]
+        self.addCleanup(cybercensus.__setattr__, "asn_prefixes", orig)
+        prefixes, ips = e.expand_asn_scope(["AS64500"], scan=True)
+        self.assertEqual(prefixes, ["203.0.113.0/30"])
+        self.assertEqual(ips, {"203.0.113.1", "203.0.113.2"})
+        self.assertIn("203.0.113.1", e.input_ips)
+        self.assertIn("203.0.113.0/30", e.asn_netblocks)
+
+
+class TestProviderPivotQueries(unittest.TestCase):
+    def test_build_queries_includes_analytics_and_icon(self):
+        qs = prov.build_queries({"a.com"}, set(), set(), set(),
+                                analytics=["G-ABC123"],
+                                icon_hashes=["123456789"])
+        kinds = [q.kind for q in qs]
+        self.assertIn("analytics", kinds)
+        self.assertIn("icon", kinds)
+
+    def test_translations(self):
+        self.assertIn('body="G-ABC123"',
+                      prov.Fofa({"email": "a@b.c", "key": "k"}).translate(
+                          prov.Query("analytics", "G-ABC123")))
+        self.assertIn('icon_hash="123"',
+                      prov.Fofa({"email": "a@b.c", "key": "k"}).translate(
+                          prov.Query("icon", "123")))
+        self.assertIn('web.body="G-ABC123"',
+                      prov.Hunter({"key": "k"}).translate(
+                          prov.Query("analytics", "G-ABC123")))
+        self.assertIn('body=="G-ABC123"',
+                      prov.ZeroZone({"key": "k"}).translate(
+                          prov.Query("analytics", "G-ABC123")))
+
+
+class TestAssetGraphAndTokenEvidence(unittest.TestCase):
+    def _engine(self):
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.names = ["Acme"]
+        e.anchor["orgs"].add("Acme")
+        return e
+
+    def test_asset_graph_nodes_and_edges(self):
+        e = self._engine()
+        a = e.add_asset("www.acme.com", 443, "https")
+        a.ip = "203.0.113.5"
+        a.cert_org = "Acme Inc"
+        a.trackings.add("ga4:G-ABC123")
+        g = e.asset_graph()
+        labels = {n["label"] for n in g["nodes"]}
+        self.assertIn("www.acme.com", labels)
+        self.assertIn("203.0.113.5", labels)
+        self.assertIn("Acme Inc", labels)
+        self.assertIn("ga4:G-ABC123", labels)
+        rels = {ed["rel"] for ed in g["edges"]}
+        self.assertIn("解析", rels)
+        self.assertIn("证书O=", rels)
+
+    def test_verify_token_evidence(self):
+        e = self._engine()
+        e.anchor["verify_tokens"].add("google:abc123456789")
+        a = e.add_asset("other.example", 443, "https")
+        a.verify_tokens.add("google:abc123456789")
+        e.evaluate()
+        self.assertTrue(any(x.startswith("B|域名验证令牌")
+                            for x in a.evidence))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

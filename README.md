@@ -131,6 +131,10 @@ pyinstaller --onefile --windowed --collect-all customtkinter --collect-all pypin
 |------|------|------|
 | FOFA / 0.zone / Hunter 鹰图 / DayDayMap | 按 domain/cert/icp/org/ip/cidr 查询，结果并入台账 | `--providers`、`--no-providers` |
 | 平台关键词检索 | title/body 精确搜短名（如"双流移动"），结果仅 C 级疑似 | `--provider-keyword`（默认关，耗配额） |
+| 平台图标/统计查询 | `icon_hash=`（favicon）、`body=`（GA/GTM/Meta 统计 ID），有 Key 时找同主体站点 | 自动（检测到锚点 favicon/统计 ID） |
+| 被动归属扩展 | 统计/像素 ID、Google/Bing/Facebook 验证令牌、证书 SAN 兄弟域、MX/SPF 域名反查 | 标准/复核模式自动；纯被动跳过 |
+| 持续监控 | 每 N 分钟重扫 + 基线对比 + Webhook 告警 | `--watch MIN`；界面「高级参数 → 持续监控」 |
+| 资产关系图谱 | 主机→IP→ASN、证书 O=、RDAP、统计 ID、验证令牌的关系链 | 自动（JSON `asset_graph` + HTML 交互图） |
 
 ### 4. 主动探测（需书面授权）
 
@@ -144,6 +148,7 @@ pyinstaller --onefile --windowed --collect-all customtkinter --collect-all pypin
 | WAF 识别 | 14 种响应头/响应体特征 | 探测页面时 |
 | 协议探针 | 非 Web 端口的轻量协议识别 | 端口开放时 |
 | C 段扩展 | 首页/输入 IP 所在 /24 扩展 | `--active --cscan` |
+| ASN 网段扩展 | 查询目标 ASN 的宣告前缀；可选展开为 IP 扫描（上限 4096） | `--asn AS...` / `--scan-asn`（隐含主动） |
 | nuclei POC | 外部工具（若安装），仅 active，模板由官方维护 | `--active` + 本机 nuclei |
 
 ### 5. APP / 小程序包（本地文件）
@@ -368,6 +373,9 @@ run.bat -d xx.gov.cn
 |------|------|
 | `--active` | 主动端口扫描 + Web 指纹，需授权 |
 | `--cscan` | 对锚点 IP 所在 /24 扩展（隐含 `--active`） |
+| `--asn AS123` | 只列出该 ASN 的宣告网段作为报告线索 |
+| `--scan-asn` | 扫描目标自有/指定 ASN 的网段（隐含 `--active`，需授权，上限 4096 IP） |
+| `--watch MIN` | 持续监控：每 N 分钟自动重扫并对比基线 |
 | `--full-ports` | 全端口 1-65535（很慢） |
 | `--top N` | 只扫前 N 个常见端口 |
 | `--ports` | 自定义端口，如 `"80,443,8000-8100"`（优先于 `--top`） |
@@ -600,6 +608,17 @@ emails, phones, authorities, refs, site_code, police_beian
     - **模板更新**：调用 `nuclei -update-templates`；发布包存在 `nuclei-templates\` 时用 `-ud` 更新包内那一份。
     - **wafw00f**：官方没有 Windows 单文件发行版，随 CyberCensus 发布包冻结更新；检查时只显示 PyPI 是否有新版本，不会破坏现有 exe。
     - 更新前请确保扫描已结束（界面在扫描中会禁用按钮）；更新只替换 `tools\` 下的文件，不影响台账和报告。
+
+34. **被动归属扩展（不碰目标）**：标准/复核模式在扫描时自动做四类反查，候选必须再通过页面/证书/RDAP/令牌互证才入锚点：
+    - **统计/像素 ID**：GA4 / GTM / Meta Pixel / Hotjar / Yandex / Matomo ID 搜全网，找同一运营团队管理的域名；
+    - **域名验证令牌**：从 DNS TXT 和页面 `<meta>` 提取 `google-site-verification`、`msvalidate.01`、`facebook-domain-verification`、`yandex-verification`、`baidu-site-verification`，同令牌 = 同控制者；
+    - **证书 SAN 兄弟域**：同一张 crt.sh 证书里与目标同证书的其他根域；
+    - **MX / SPF 域名**：目标邮件域、SPF `include:` 域（自动过滤 QQ/163/SendGrid 等公共邮件基础设施）。
+    纯被动模式（`--no-probe`）只记录这些线索、不做验证，避免误报。
+35. **平台查询增强**：检测到锚点的 favicon（mmh3）和统计 ID 后，自动追加 FOFA `icon_hash=` / `body=`、Hunter/0.zone/DayDayMap `body` 查询；结果分别按 B 级（图标/统计 ID 命中）和 C 级（ASN/IP）参与分级。没有 Key 时不影响本地链路。
+36. **ASN / 网段扩展**：`--asn AS12345` 查 RIPEstat 宣告前缀并写入报告；`--scan-asn` 才把前缀展开成 IP 加入主动扫描（上限 4096 IP，需授权确认）。适合"只有一个 IP、没有域名"的自有网段资产。界面「高级参数 → 目标 ASN」可填多个并勾选扫描。
+37. **持续监控**：`--watch 30` 每 30 分钟自动重扫，复用 `baseline.json` 做新增/下线/变化对比并触发 Webhook；界面「高级参数 → 持续监控」填分钟数（0=关），扫描完成后自动倒计时，可点「停止监控」取消。
+38. **资产关系图谱**：JSON 输出 `asset_graph`（nodes/edges），HTML 报告内置可交互 canvas（悬停查看、滚轮预留），Markdown/Word 报告输出关系摘要。链路包括 主机→IP→ASN、证书 O=、RDAP 注册人、统计 ID、验证令牌。
 
 ## 平台配额与频率（重要）
 

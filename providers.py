@@ -177,11 +177,14 @@ class Query(object):
         return "%s=%s" % (self.kind, self.value)
 
 
-def build_queries(domains, beians, orgs, ips, cidrs=None, keywords=()):
+def build_queries(domains, beians, orgs, ips, cidrs=None, keywords=(),
+                  analytics=(), icon_hashes=()):
     """生成高精度查询计划。顺序：强证据优先。
 
     keywords 是可选的 title/body 关键词查询（如"双流移动"这种
-    平台内容检索场景）——结果只作为 C 级线索，不参与强证据判定。
+    平台内容检索场景）——结果只作为 C 级线索。
+    analytics：页面统计/像素 ID（GA4/GTM/Meta 等）→ body 查询，B 级。
+    icon_hashes：favicon 的 mmh3 哈希 → FOFA icon_hash 查询，B 级。
     """
     qs = []
     seen = set()
@@ -207,6 +210,10 @@ def build_queries(domains, beians, orgs, ips, cidrs=None, keywords=()):
         add("ip", ip)
     for c in sorted(set(cidrs or [])):
         add("cidr", c)
+    for a in sorted(set(x for x in analytics if x))[:3]:
+        add("analytics", a)
+    for h in sorted(set(str(x) for x in icon_hashes if x))[:1]:
+        add("icon", h)
     # 关键词放在最后：消耗配额、只产生 C 级线索，不能挤掉强证据查询
     for kw in list(dict.fromkeys(k.strip() for k in (keywords or ()) if k and k.strip()))[:8]:
         if 2 <= len(kw) <= 40:
@@ -364,7 +371,8 @@ class Fofa(BaseProvider):
     min_interval = 0.6
     page_size = 100
     max_pages = 10
-    supports = ("domain", "cert", "icp", "org", "ip", "cidr", "keyword")
+    supports = ("domain", "cert", "icp", "org", "ip", "cidr", "keyword",
+                "analytics", "icon")
 
     def translate(self, q):
         v = q.value.replace('"', '\\"')
@@ -380,6 +388,10 @@ class Fofa(BaseProvider):
             return 'ip="%s"' % v
         if q.kind == "keyword":
             return 'body="%s"' % v
+        if q.kind == "analytics":
+            return 'body="%s"' % v
+        if q.kind == "icon":
+            return 'icon_hash="%s"' % v
         return None
 
     def search(self, native_query, page=1, size=None):
@@ -415,7 +427,8 @@ class ZeroZone(BaseProvider):
     page_size = 100
     max_pages = 10
     max_queries = 30
-    supports = ("domain", "cert", "icp", "org", "ip", "cidr", "keyword")
+    supports = ("domain", "cert", "icp", "org", "ip", "cidr", "keyword",
+                "analytics")
     ENDPOINT = "https://0.zone/api/data/"
 
     def translate(self, q):
@@ -442,6 +455,8 @@ class ZeroZone(BaseProvider):
                 return None
         if q.kind == "keyword":
             return 'title=="%s"' % v
+        if q.kind == "analytics":
+            return 'body=="%s"' % v
         return None
 
     def search(self, native_query, page=1, size=None):
@@ -476,7 +491,8 @@ class Hunter(BaseProvider):
     min_interval = 2.05     # 官方限制：1 次 / 2 秒
     page_size = 100         # API 单页上限 100；2 秒/次的限速下大页明显更快
     max_pages = 10
-    supports = ("domain", "cert", "icp", "org", "ip", "cidr", "keyword")
+    supports = ("domain", "cert", "icp", "org", "ip", "cidr", "keyword",
+                "analytics")
     ENDPOINT = "https://api.hunter.how/search"
 
     def translate(self, q):
@@ -492,6 +508,8 @@ class Hunter(BaseProvider):
         if q.kind in ("ip", "cidr"):
             return 'ip="%s"' % v
         if q.kind == "keyword":
+            return 'web.body="%s"' % v
+        if q.kind == "analytics":
             return 'web.body="%s"' % v
         return None
 
@@ -533,7 +551,8 @@ class DayDayMap(BaseProvider):
     min_interval = 1.0
     page_size = 100
     max_pages = 10
-    supports = ("domain", "cert", "icp", "org", "ip", "cidr", "keyword")
+    supports = ("domain", "cert", "icp", "org", "ip", "cidr", "keyword",
+                "analytics")
     ENDPOINT = "https://www.daydaymap.com/api/v1/raymap/search/all"
 
     def translate(self, q):
@@ -549,6 +568,8 @@ class DayDayMap(BaseProvider):
         if q.kind in ("ip", "cidr"):
             return 'ip="%s"' % v
         if q.kind == "keyword":
+            return 'web.body="%s"' % v
+        if q.kind == "analytics":
             return 'web.body="%s"' % v
         return None
 

@@ -852,6 +852,45 @@ TRACKING_PATTERNS = [
 ]
 
 
+# 域名验证令牌：同一主体常把同一个令牌同时挂在多个域名上（DNS TXT 或页面 meta），
+# 是跨域归属的强线索。搜索令牌就能找到"没有备案、域名也不像"的关联站点。
+VERIFY_TOKEN_PATTERNS = [
+    ("google", re.compile(r"google-site-verification\s*[=:]\s*([A-Za-z0-9_\-]{10,})", re.I)),
+    ("bing", re.compile(r"(?:msvalidate\.01|msvalidation)\s*[=:]\s*([A-Za-z0-9]{10,})", re.I)),
+    ("facebook", re.compile(r"facebook-domain-verification\s*[=:]\s*([a-z0-9]{10,})", re.I)),
+    ("yandex", re.compile(r"yandex-verification\s*[=:]\s*([a-f0-9]{12,})", re.I)),
+    ("baidu", re.compile(r"baidu-site-verification\s*[=:\"']+\s*([A-Za-z0-9]{8,})", re.I)),
+    # HTML meta：<meta name="google-site-verification" content="xxx">
+    ("google", re.compile(r'name=["\']google-site-verification["\'][^>]*content=["\']([^"\']+)', re.I)),
+    ("bing", re.compile(r'name=["\']msvalidate\.01["\'][^>]*content=["\']([^"\']+)', re.I)),
+    ("facebook", re.compile(r'name=["\']facebook-domain-verification["\'][^>]*content=["\']([^"\']+)', re.I)),
+]
+
+
+def extract_verify_tokens(text, limit=8):
+    """提取 google/bing/facebook/yandex/baidu 域名验证令牌，返回 ["google:xxx", ...]。"""
+    out = []
+    for name, pat in VERIFY_TOKEN_PATTERNS:
+        for m in pat.finditer(str(text or "")):
+            v = "%s:%s" % (name, m.group(1))
+            if v not in out:
+                out.append(v)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+# 邮件/云厂商域名：MX / SPF 反查时排除，否则会把 QQ 邮箱、SendGrid 当资产
+MAIL_INFRA_ROOTS = frozenset((
+    "qq.com", "163.com", "126.com", "yeah.net", "sina.com", "sohu.com",
+    "aliyun.com", "aliyuncs.com", "outlook.com", "office365.com",
+    "google.com", "gmail.com", "googlemail.com", "sendgrid.net",
+    "mailgun.org", "sparkpostmail.com", "amazonses.com", "zoho.com",
+    "yandex.ru", "mail.ru", "cloudflare.com", "mimecast.com",
+    "pphosted.com", "proofpoint.com", "barracudanetworks.com",
+))
+
+
 def extract_tracking_ids(text, limit=12):
     """提取页面里全部统计/像素 ID，返回 ["ga4:G-XXX", ...]。"""
     out = []
@@ -1427,7 +1466,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
            "tech": "", "body_len": 0, "credit_code": "", "refs": [], "meta": "",
            "site_code": "", "police_beian": "",
            "emails": [], "phones": [], "authorities": [],
-           "registry_ids": [], "trackings": [],
+           "registry_ids": [], "trackings": [], "verify_tokens": [],
            "scripts": [], "waf": ""}
     body = ""
     status = ""
@@ -1476,6 +1515,7 @@ def http_probe(host, port, scheme, timeout=8, throttle=0.0):
     out["authorities"] = _extract_authority(body)    # 页脚主办/版权单位（中英文）
     out["registry_ids"] = extract_registry_ids(body)  # LEI/VAT/DUNS/公司注册号
     out["trackings"] = extract_tracking_ids(body)     # 统计/像素 ID（国际站 B 级证据）
+    out["verify_tokens"] = extract_verify_tokens(body)  # 域名验证令牌（跨域归属）
     out["scripts"] = _extract_scripts(body, url)     # 外部 JS（后续挖域名/密钥）
     out["waf"] = detect_waf(
         " ".join("%s:%s" % (k, v) for k, v in hdrs.items()), body)  # 防护设备识别
@@ -1892,6 +1932,29 @@ def parse_asn_txt(txt):
     return {"asn": "AS" + m.group(1), "prefix": m.group(2), "country": m.group(3)}
 
 
+def asn_prefixes(asn, timeout=20):
+    """ASN 宣告的网段（RIPEstat，免费无 Key）。失败返回 []。"""
+    a = str(asn or "").strip().upper()
+    if not a:
+        return []
+    if not a.startswith("AS"):
+        a = "AS" + a.lstrip("AS")
+    try:
+        url = ("https://stat.ripe.net/data/announced-prefixes/data.json?resource="
+               + urllib.parse.quote(a))
+        data = json.loads(http_get(url, timeout=timeout, retries=1,
+                                   headers={"Accept": "application/json"}))
+        out = []
+        for p in ((data.get("data") or {}).get("prefixes") or []):
+            v = str(p.get("prefix") or "").strip()
+            if v and v not in out:
+                out.append(v)
+        return out
+    except Exception as e:
+        log("ASN(%s) 前缀查询失败: %s" % (a, str(e)[:80]), "!")
+        return []
+
+
 def asn_info(ip, timeout=8):
     """IP → ASN/归属 AS 名称（Team Cymru DNS）。失败返回 {}。"""
     ip = (ip or "").strip()
@@ -1972,6 +2035,49 @@ def crt_subdomains(domain, timeout=25):
     except Exception as e:
         log("crt.sh(%s) 失败: %s" % (domain, str(e)[:80]), "!")
     return names
+
+
+def crt_sibling_domains(domain, timeout=25, limit=20):
+    """从 crt.sh 同一张证书里提取"兄弟根域"。
+
+    同一证书常同时签给集团/子公司的多个域名（SAN）。如果证书里出现目标域，
+    其他根域就是高价值归属候选——它们可能没有备案、名字也不含单位名。
+    只返回根域且排除搜索引擎/目录噪音，最终仍需证书/页面/RDAP 互证。
+    """
+    out, seen = [], set()
+    try:
+        url = ("https://crt.sh/?q=%25." + urllib.parse.quote(domain)
+               + "&output=json")
+        data = json.loads(http_get(url, timeout=timeout, retries=1))
+        target_root = root_domain(domain)
+        groups = {}
+        for e in data:
+            key = str(e.get("serial_number") or e.get("id") or "")
+            if not key:
+                continue
+            for n in str(e.get("name_value", "")).split("\n"):
+                n = n.strip().lower().lstrip("*.")
+                if not n or "." not in n:
+                    continue
+                groups.setdefault(key, set()).add(n)
+        for names in groups.values():
+            hit = any(n == target_root or n.endswith("." + target_root)
+                      for n in names)
+            if not hit:
+                continue
+            for n in names:
+                r = root_domain(n)
+                if not r or r == target_root:
+                    continue
+                if r in SEARCH_JUNK_ROOTS or r in seen:
+                    continue
+                seen.add(r)
+                out.append(r)
+                if len(out) >= limit:
+                    return out
+    except Exception as e:
+        log("crt.sh 兄弟域(%s) 失败: %s" % (domain, str(e)[:80]), "!")
+    return out
 
 
 def crt_by_org(org, timeout=25):
@@ -2951,7 +3057,8 @@ class Asset(object):
                  "prov_org", "reject_reason", "urls", "findings", "credit_code",
                  "emails", "phones", "authorities", "refs",
                  "site_code", "police_beian", "rdap_org", "rdap_country",
-                 "trackings", "registry_ids", "asn", "asn_org")
+                 "trackings", "registry_ids", "asn", "asn_org",
+                 "verify_tokens")
 
     def __init__(self, host, port=None, scheme=None):
         self.host = host
@@ -2993,6 +3100,7 @@ class Asset(object):
         self.registry_ids = set() # LEI/VAT/DUNS/公司注册号
         self.asn = ""             # 所属 ASN（Team Cymru）
         self.asn_org = ""         # AS 注册名称（与主体名吻合时作证据）
+        self.verify_tokens = set()  # 页面/DNS 中的域名验证令牌
 
     def key(self):
         p = self.port or (443 if self.scheme == "https" else 80 if self.scheme == "http" else "")
@@ -3012,7 +3120,7 @@ def _merge_assets(dst, src):
     """字段级合并：集合字段取并集，标量字段空才填（src 的证据不覆盖 dst 已有值）。"""
     for s in ("source", "providers", "prov_kinds", "urls", "findings",
               "emails", "phones", "authorities", "refs", "trackings",
-              "registry_ids"):
+              "registry_ids", "verify_tokens"):
         getattr(dst, s).update(getattr(src, s))
     for s in ("ip", "title", "server", "scheme", "status", "beian", "prov_beian",
               "prov_cert", "prov_org", "cert_org", "cert_san", "analytics",
@@ -3237,6 +3345,7 @@ class Engine(object):
                        "emails": set(), "phones": set(), "authorities": set(),
                        "site_codes": set(), "police_beians": set(),
                        "trackings": set(), "registry_ids": set(),
+                       "verify_tokens": set(),
                        "rdap_orgs": set(), "asns": set()}
         self.ip_notes = {}        # ip -> info dict
         self.provider_records = []
@@ -3256,6 +3365,8 @@ class Engine(object):
         self.ext_used = {}              # 本轮实际调用的外部工具 {名称: 路径}
         self.ext_detected = set()       # 本机检测到的外部工具（含本轮未调用的）
         self._rdap_cache = {}           # 根域 -> RDAP 结果
+        self._dns_candidates = []       # MX/SPF 派生的候选 [(host, source)]
+        self.asn_netblocks = set()      # 目标 ASN 宣告的前缀（报告用）
         self.asn_owned_ips = set()      # 与主体名互证通过的自有 ASN IP
         self.intl_mode = any(_is_ascii_name(n) and not re.search(r"[一-龥]", n or "")
                              for n in self.names)
@@ -3576,6 +3687,7 @@ class Engine(object):
         a.refs.update(info.get("refs") or [])
         a.trackings.update(info.get("trackings") or [])
         a.registry_ids.update(info.get("registry_ids") or [])
+        a.verify_tokens.update(info.get("verify_tokens") or [])
         return a
 
     def _rdap_for(self, host):
@@ -3607,6 +3719,51 @@ class Engine(object):
         """
         rd = self._rdap_for(dom)
         return any(o and _org_match(name, o) for o in (rd.get("orgs") or []))
+
+    def expand_asn_scope(self, asns, scan=False, max_ips=4096):
+        """把 ASN 宣告前缀展开成 IP 范围。
+
+        scan=False 只记录前缀（报告线索），不把 IP 加入扫描范围；
+        scan=True 才把 IP 加入 input_ips（仍受 --active 的授权确认约束）。
+        """
+        asns = [a for a in dict.fromkeys(str(x).strip().upper() for x in asns)
+                if a]
+        if not asns:
+            return [], set()
+        prefixes, ips = set(), set()
+        for asn in asns:
+            for p in asn_prefixes(asn):
+                prefix = p.strip()
+                if not prefix or ":" in prefix:
+                    continue
+                try:
+                    net = ipaddress.ip_network(prefix, strict=False)
+                except Exception:
+                    continue
+                prefixes.add(str(net))
+                if not scan:
+                    continue
+                remaining = max_ips - len(ips)
+                if remaining <= 0:
+                    log("ASN 展开达到 IP 上限 %d，其余前缀仅记录" % max_ips, "!")
+                    break
+                if net.num_addresses > remaining:
+                    log("ASN %s 前缀 %s 太大（%d 地址），跳过扫描"
+                        % (asn, net, net.num_addresses), "!")
+                    continue
+                for h in net.hosts():
+                    ips.add(str(h))
+        self.asn_netblocks |= prefixes
+        if prefixes:
+            log("ASN %s 宣告前缀 %d 个：%s"
+                % ("/".join(asns), len(prefixes),
+                   ", ".join(sorted(prefixes)[:12])
+                   + (" …" if len(prefixes) > 12 else "")), "+")
+        if scan and ips:
+            self.input_ips |= ips
+            self.anchor["ips"] |= ips
+            log("ASN 展开 %d 个 IP 加入扫描范围（授权范围内）" % len(ips), "!")
+        return sorted(prefixes), ips
 
     def _apply_asn(self, a, names):
         """IP → ASN；AS 注册名称与主体名吻合时，该 IP 视为目标自有地址。"""
@@ -3655,6 +3812,18 @@ class Engine(object):
             self._add_verified_domain(dom)
             return True
 
+        # DNS TXT 验证令牌互证（同一 Google/Bing/Facebook 令牌 = 同一控制者）
+        if self.anchor.get("verify_tokens"):
+            toks = set(extract_verify_tokens(_dns_txt(root or dom)))
+            shared = toks & set(self.anchor["verify_tokens"])
+            if shared:
+                info = {"verify_tokens": sorted(shared)}
+                self._remember_asset(dom, info)
+                log("  DNS 验证令牌互证: %s ← %s"
+                    % (dom, sorted(shared)[0]), "+")
+                self._add_verified_domain(dom)
+                return True
+
         for scheme, port in (("https", 443), ("http", 80)):
             info = http_probe(dom, port, scheme, timeout=self.args.timeout)
             if info.get("status") in ("", None):
@@ -3691,6 +3860,11 @@ class Engine(object):
                 self._remember_asset(dom, info)
                 self._add_verified_domain(dom)
                 log("  官方注册号互证: %s" % dom, "+")
+                return True
+            if set(info.get("verify_tokens") or []) & self.anchor["verify_tokens"]:
+                self._remember_asset(dom, info)
+                self._add_verified_domain(dom)
+                log("  页面验证令牌互证: %s" % dom, "+")
                 return True
             # 页面反向链接到目标主域（互链归属）
             if set(info.get("refs") or []) & set(self.anchor["domains"]):
@@ -3853,8 +4027,13 @@ class Engine(object):
                     self.anchor["police_beians"].add(a.police_beian)
                 a.trackings.update(info.get("trackings") or [])
                 a.registry_ids.update(info.get("registry_ids") or [])
+                a.verify_tokens.update(info.get("verify_tokens") or [])
                 self.anchor["trackings"].update(a.trackings)
                 self.anchor["registry_ids"].update(a.registry_ids)
+                self.anchor["verify_tokens"].update(a.verify_tokens)
+                if a.verify_tokens:
+                    log("  锚点域名验证令牌: %s"
+                        % "、".join(sorted(a.verify_tokens)[:4]), "+")
                 if a.trackings:
                     log("  锚点统计/像素ID: %s"
                         % "、".join(sorted(a.trackings)[:6]), "+")
@@ -3943,10 +4122,29 @@ class Engine(object):
 
             # DNS 记录（MX/NS/TXT 只做线索记录，不作为资产，避免把第三方邮件/DNS 服务商算进来）
             rec = dns_records(d)
+            txt_all = " ".join(rec.get("TXT", []))
+            # 域名验证令牌：同一 owner 常跨域复用，记入锚点供跨域反查
+            vtoks = extract_verify_tokens(txt_all)
+            if vtoks:
+                a = self.add_asset(d, None, None, source="dns:token")
+                a.verify_tokens.update(vtoks)
+                self.anchor["verify_tokens"].update(vtoks)
+                log("  DNS 验证令牌: %s" % "、".join(sorted(vtoks)), "+")
+            own_root = root_domain(d)
+
+            def _dns_cand(host, src):
+                r = root_domain(host)
+                if (not r or r == own_root or r in SEARCH_JUNK_ROOTS
+                        or r in MAIL_INFRA_ROOTS or r in self.domains):
+                    return
+                self._dns_candidates.append((r, src))
+                log("  DNS 关联候选(%s): %s" % (src, r), "+")
+
             for mx in rec.get("MX", []):
                 mx = mx.strip().rstrip(".")
                 if mx:
                     log("  MX: %s" % mx)
+                    _dns_cand(mx, "mx")
             for ns in rec.get("NS", []):
                 ns = ns.strip().rstrip(".")
                 if ns:
@@ -3956,6 +4154,9 @@ class Engine(object):
                     if any(k in m.lower() for k in ("spf", "include", "ip4", "ip6")):
                         continue
                     self.sub_map.setdefault(m.lower(), "")
+                for inc in re.findall(r"include:([A-Za-z0-9_.\-]+\.[A-Za-z]{2,})",
+                                      txt, re.I):
+                    _dns_cand(inc, "spf")
                 for ipm in re.findall(r"ip4:(\d+\.\d+\.\d+\.\d+)", txt):
                     # SPF 授权的通常是 sendgrid/google 等第三方发信商 IP，
                     # 既不该被主动扫描也不该拿去平台查询，仅记录供人工研判
@@ -4134,6 +4335,7 @@ class Engine(object):
                     else:
                         log("RDAP(%s) 注册人（未互证，仅记录）: %s"
                             % (d, rd_org))
+        self.verify_dns_candidates()
 
     @staticmethod
     def _guess_root(host):
@@ -4392,10 +4594,15 @@ class Engine(object):
             if kws:
                 log("平台关键词查询（title/body，仅作 C 级线索）: %s"
                     % ", ".join(kws), "!")
+        # 统计/像素 ID 与 favicon 哈希：平台内容/图标检索，找"域名不像"的同主体站点
+        analytics = sorted({v.split(":", 1)[-1]
+                            for v in (self.anchor.get("trackings") or ())
+                            if ":" in v and len(v.split(":", 1)[-1]) >= 6})[:3]
+        icons = sorted(self.anchor.get("favicon") or ())[:1]
         queries = prov_layer.build_queries(
             self.anchor["domains"], self.anchor["beian"], self.anchor["orgs"],
             set(self.anchor["ips"]) | set(self.input_ips), cidrs,
-            keywords=kws)
+            keywords=kws, analytics=analytics, icon_hashes=icons)
         log("平台聚合：%s | 查询 %d 条" % (",".join(sorted(provs)), len(queries)))
         recs, stats = prov_layer.run(
             provs, queries,
@@ -4589,6 +4796,10 @@ class Engine(object):
             if a.phones and (a.phones & self.anchor["phones"]):
                 ev.append("B|联系电话一致:%s" % sorted(a.phones & self.anchor["phones"])[0])
                 B += 1
+            vt = set(a.verify_tokens or ()) & set(self.anchor["verify_tokens"])
+            if vt:
+                ev.append("B|域名验证令牌一致:%s" % sorted(vt)[0])
+                B += 1
             if a.authorities:
                 for x in a.authorities:
                     if any(o and (_org_match(o, x) or _org_match_fuzzy(o, x))
@@ -4655,6 +4866,15 @@ class Engine(object):
                 # 平台 title/body 关键词命中（如"双流移动"）只作线索：
                 # 可能只是页面提到该名称，不能作为归属证据
                 ev.append("C|平台关键词命中(待核)")
+                C += 1
+            if "analytics" in pk:
+                ev.append("B|平台统计ID/像素命中")
+                B += 1
+            if "icon" in pk:
+                ev.append("B|平台favicon哈希命中")
+                B += 1
+            if "asn" in pk:
+                ev.append("C|平台ASN命中:%s" % a.ip)
                 C += 1
 
             if nprov >= 2 and (pk & {"domain", "cert", "icp", "org"}):
@@ -5018,6 +5238,94 @@ class Engine(object):
         if hits:
             log("关键词线索: %d 条搜索命中，%d 个主机进入台账（报告查看）"
                 % (hits, added), "+")
+
+    def verify_dns_candidates(self, limit=20):
+        """验证 MX/SPF 派生候选：必须靠页面/证书/令牌互证才入锚点。"""
+        if not self._dns_candidates:
+            return
+        if getattr(self.args, "no_probe", False):
+            log("DNS 关联候选 %d 个：纯被动模式不探测，未纳入（避免误报）"
+                % len(self._dns_candidates), "!")
+            return
+        name = ((self.names or sorted(self.anchor["orgs"]) or [""])[0])
+        seen = set()
+        for host, src in self._dns_candidates[:limit]:
+            if host in seen or host in self.domains:
+                continue
+            seen.add(host)
+            try:
+                if self._verify_candidate_domain(name, host):
+                    self.add_asset(host, None, None,
+                                   source="pivot:%s" % src)
+                    log("DNS 候选验证通过(%s): %s" % (src, host), "+")
+                else:
+                    log("DNS 候选未通过互证(%s): %s" % (src, host))
+            except Exception:
+                pass
+
+    def expand_identity_pivots(self, max_queries=4, max_certs=2):
+        """用统计 ID / 验证令牌 / 证书 SAN 兄弟域做归属扩展。
+
+        这些线索不依赖域名像不像、也不依赖备案：
+        - 同一 GA/GTM/Meta ID 往往由同一运营团队管理
+        - 同一 Google/Bing/Facebook 验证令牌 = 同一域名控制者
+        - 同一张证书 SAN 里的其他根域常是同集团站点
+        搜到的候选一律要再经过页面/证书/RDAP 互证。
+        """
+        if getattr(self.args, "no_probe", False):
+            log("归属扩展（统计ID/验证令牌/证书兄弟域）：纯被动模式跳过验证，"
+                "请用标准模式以纳入新资产", "!")
+            return
+        name = ((self.names or sorted(self.anchor["orgs"]) or [""])[0])
+        queries = []
+        for tid in sorted(self.anchor.get("trackings") or ()):
+            val = tid.split(":", 1)[-1]
+            if val and len(val) >= 6:
+                queries.append(('"%s"' % val, "tracking", tid))
+        for tok in sorted(self.anchor.get("verify_tokens") or ()):
+            val = tok.split(":", 1)[-1]
+            if val and len(val) >= 8:
+                queries.append(('"%s"' % val, "token", tok))
+        done = 0
+        for q, kind, label in queries:
+            if done >= max_queries:
+                break
+            done += 1
+            log("归属扩展搜索（%s %s）" % (kind, label))
+            for u in search_multi_urls(q):
+                host = _url_host(u)
+                if not host:
+                    continue
+                if len(self.risk_hints) < 200:
+                    self.risk_hints.append(("归属扩展｜%s" % label, u))
+                under = any(host == d or host.endswith("." + d)
+                            for d in self.anchor["domains"])
+                if under:
+                    self.add_asset(host, None, None, source="pivot:%s" % kind)
+                    continue
+                try:
+                    if self._verify_candidate_domain(name, host):
+                        self.add_asset(host, None, None,
+                                       source="pivot:%s" % kind)
+                        log("  归属扩展候选验证通过(%s): %s" % (kind, host), "+")
+                except Exception:
+                    pass
+        strong = sorted(set(self.anchor["domains"])
+                        - set(self.anchor.get("weak_domains") or ()))
+        for d in strong[:max_certs]:
+            siblings = crt_sibling_domains(d, limit=10)
+            if not siblings:
+                continue
+            log("证书 SAN 兄弟域（%s）: %s" % (d, ", ".join(siblings)))
+            for sib in siblings:
+                if sib in self.domains:
+                    continue
+                try:
+                    if self._verify_candidate_domain(name, sib):
+                        self.add_asset(sib, None, None, source="pivot:cert")
+                        log("  证书兄弟域验证通过: %s" % sib, "+")
+                except Exception:
+                    pass
 
     def collect_risk_hints(self, max_domains=3):
         """对主体域名做搜索引擎 dork 情报收集（文档第9步：谷歌语法 + GitHub）。
@@ -5464,6 +5772,66 @@ class Engine(object):
                 log("  引用域名互证通过: %s" % root, "+")
 
     # ---- 5. 输出 ----
+    def asset_graph(self, limit=300):
+        """资产关系图数据：域名/主机 → IP → ASN；证书 O=、统计ID、令牌 → 主机。
+
+        返回 {"nodes":[{"id","kind","label"}], "edges":[{"source","target","rel"}]}。
+        只做展示和人工研判，不参与分级。
+        """
+        nodes, edges = {}, set()
+
+        def n(label, kind):
+            label = str(label)[:120]
+            if not label:
+                return ""
+            key = "%s:%s" % (kind, label)
+            nodes.setdefault(key, {"id": key, "kind": kind, "label": label})
+            return key
+
+        def e(a, b, rel):
+            if a and b and a != b:
+                edges.add((a, b, rel))
+
+        rows = sorted(self.assets.values(),
+                      key=lambda a: ({"确认": 0, "疑似": 1, "存疑": 2}
+                                     .get(a.confidence, 3)))
+        for a in rows[:limit]:
+            host = a.host or a.ip
+            if not host:
+                continue
+            hk = n(host, "host")
+            if a.ip:
+                ik = n(a.ip, "ip")
+                e(hk, ik, "解析")
+                if a.asn or a.asn_org:
+                    ak = n(("%s %s" % (a.asn or "", a.asn_org or "")).strip(),
+                           "asn")
+                    e(ik, ak, "属于")
+            if a.cert_org:
+                e(hk, n(a.cert_org, "org"), "证书O=")
+            if a.rdap_org:
+                e(hk, n(a.rdap_org, "org"), "RDAP")
+            for t in sorted(a.trackings):
+                e(hk, n(t, "tracking"), "统计ID")
+            for v in sorted(a.verify_tokens):
+                e(hk, n(v, "token"), "验证令牌")
+        return {"nodes": list(nodes.values()),
+                "edges": [{"source": s, "target": t, "rel": r}
+                          for s, t, r in sorted(edges)]}
+
+    def _graph_lines(self, limit=50):
+        g = self.asset_graph()
+        by_id = {x["id"]: x for x in g["nodes"]}
+        out = []
+        for ed in g["edges"]:
+            s = by_id.get(ed["source"], {})
+            t = by_id.get(ed["target"], {})
+            out.append("%s —[%s]→ %s"
+                       % (s.get("label", ""), ed["rel"], t.get("label", "")))
+            if len(out) >= limit:
+                break
+        return out
+
     def output(self, baseline_diff=None):
         log("== 阶段5: 生成报告 ==", "#")
         outdir = self.args.out
@@ -5487,7 +5855,7 @@ class Engine(object):
                 "prov_org", "source", "evidence", "reject_reason", "urls",
                 "plain", "findings", "emails", "phones", "authorities", "refs",
                 "site_code", "police_beian", "rdap_org", "rdap_country",
-                "trackings", "registry_ids", "asn", "asn_org"]
+                "trackings", "registry_ids", "asn", "asn_org", "verify_tokens"]
 
         def write_csv(path, items):
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -5515,6 +5883,7 @@ class Engine(object):
                         ";".join(sorted(a.trackings)),
                         ";".join(sorted(a.registry_ids)),
                         a.asn, a.asn_org,
+                        ";".join(sorted(a.verify_tokens)),
                     ])
 
         # 输出格式选择（--formats / 界面开关）：md / csv / json；未指定=全出
@@ -5547,6 +5916,8 @@ class Engine(object):
                 "domains": sorted(self.anchor["domains"]),
                 "input_ips": sorted(self.input_ips),
                 "anchor": {k: sorted(v) for k, v in self.anchor.items()},
+                "asn_netblocks": sorted(self.asn_netblocks),
+                "asset_graph": self.asset_graph(),
                 "ip_notes": self.ip_notes,
                 "spf_ips": sorted(self.spf_ips),
                 "provider_stats": self.provider_stats,
@@ -5662,6 +6033,9 @@ class Engine(object):
                      % "、".join(sorted(self.anchor["rdap_orgs"])))
         if self.anchor["asns"]:
             L.append("- 目标自有 ASN：%s" % "、".join(sorted(self.anchor["asns"])))
+        if self.asn_netblocks:
+            L.append("- ASN 宣告网段（可作扫描范围）：%s"
+                     % "、".join(sorted(self.asn_netblocks)[:20]))
         if self.anchor["favicon"]:
             L.append("- 锚点favicon：%s" % "、".join(sorted(self.anchor["favicon"])))
         if self.anchor["orgs"]:
@@ -5672,6 +6046,16 @@ class Engine(object):
                         "、".join(self.intel.get("queries") or []) or "—",
                         "、".join(self.intel.get("seed_domains") or []) or "—"))
         L.append("")
+
+        # 资产关系图谱（文本摘要；HTML 报告里是可交互画布）
+        glines = self._graph_lines(limit=50)
+        if glines:
+            L.append("## 🕸 资产关系图谱（摘要）\n")
+            L.append("> 域名/主机 → IP → ASN，以及证书 O=、RDAP、统计 ID、验证令牌的归属链。"
+                     "完整数据见 JSON 的 `asset_graph`，HTML 报告里可交互查看。\n")
+            for line in glines:
+                L.append("- " + line)
+            L.append("")
 
         # 平台统计
         if self.provider_stats:
@@ -6208,6 +6592,77 @@ class Engine(object):
         parts.append("<p class='tip'>判定规则：确认 = 强证据(A)≥1 或 较强证据(B)≥2；"
                      "疑似 = B=1 或 弱证据(C)≥1；剔除 = 无证据或三方云资源且无强证据。"
                      "强证据：备案号 / 证书O= / 统一社会信用代码 / 已知主域名子域。</p>")
+        # 可交互资产关系图（自包含 canvas，不依赖 CDN）
+        graph = self.asset_graph(limit=200)
+        if graph["nodes"]:
+            gjson = json.dumps(graph, ensure_ascii=False).replace("</", "<\\/")
+            parts.append("<h2>🕸 资产关系图谱（可交互）</h2>")
+            parts.append("<p class='muted'>节点：主机 / IP / ASN / 证书组织 / 统计 ID / 验证令牌。"
+                         "鼠标悬停查看名称；滚动缩放。</p>")
+            parts.append(
+                "<div id='graph' style='position:relative;width:100%;height:540px;"
+                "background:#070d16;border:1px solid #1b2a3d;border-radius:10px;"
+                "overflow:hidden'><canvas id='gcv' style='width:100%;height:100%'>"
+                "</canvas><div id='gtip' style='position:absolute;pointer-events:none;"
+                "display:none;background:#0d1a2a;border:1px solid #2ad0e8;color:#dfe9f5;"
+                "font:11px monospace;padding:4px 7px;border-radius:5px;white-space:nowrap'>"
+                "</div></div>")
+            parts.append("""<script>
+(function(){
+ const G=%s, cv=document.getElementById('gcv'), tip=document.getElementById('gtip');
+ const ctx=cv.getContext('2d'); let W=0,H=0,scale=1,hover=null;
+ const COL={host:'#2ad0e8',ip:'#6ee7a8',asn:'#f5b94a',org:'#b28bff',
+            tracking:'#ff7ab6',token:'#ff9f5a'};
+ function fit(){const r=cv.getBoundingClientRect();W=r.width;H=r.height;
+   const d=window.devicePixelRatio||1;cv.width=W*d;cv.height=H*d;
+   ctx.setTransform(d,0,0,d,0,0);}
+ fit();
+ const by={};G.nodes.forEach((n,i)=>{by[n.id]=n;
+   n.x=W/2+(Math.random()-0.5)*W*0.7;n.y=H/2+(Math.random()-0.5)*H*0.7;
+   n.vx=0;n.vy=0;});
+ const E=G.edges.filter(e=>by[e.source]&&by[e.target]);
+ for(let it=0;it<220;it++){
+   for(let i=0;i<G.nodes.length;i++){const a=G.nodes[i];
+     for(let j=i+1;j<G.nodes.length;j++){const b=G.nodes[j];
+       let dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy+1;
+       if(d2<40000){const f=900/d2;dx*=f;dy*=f;a.vx+=dx;a.vy+=dy;b.vx-=dx;b.vy-=dy;}}}
+   for(const e of E){const a=by[e.source],b=by[e.target];
+     let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
+     const f=(d-70)*0.004;dx*=f;dy*=f;a.vx+=dx;a.vy+=dy;b.vx-=dx;b.vy-=dy;}
+   for(const n of G.nodes){n.vx+=(W/2-n.x)*0.0007;n.vy+=(H/2-n.y)*0.0007;
+     n.vx*=0.86;n.vy*=0.86;n.x+=n.vx;n.y+=n.vy;
+     n.x=Math.max(20,Math.min(W-20,n.x));n.y=Math.max(20,Math.min(H-20,n.y));}
+ }
+ function draw(){
+   ctx.clearRect(0,0,W,H);
+   ctx.strokeStyle='rgba(70,110,150,.35)';ctx.lineWidth=1;
+   for(const e of E){const a=by[e.source],b=by[e.target];
+     ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}
+   for(const n of G.nodes){const r=(n===hover)?8:5;
+     ctx.beginPath();ctx.arc(n.x,n.y,r,0,7);
+     ctx.fillStyle=COL[n.kind]||'#8aa0b6';ctx.fill();
+     if(n.kind!=='ip'||n===hover){
+       ctx.fillStyle='#9fb4c9';ctx.font='10px monospace';
+       ctx.fillText(String(n.label).slice(0,26),n.x+r+3,n.y+3);}
+   }
+ }
+ cv.addEventListener('mousemove',ev=>{
+   const r=cv.getBoundingClientRect(),mx=ev.clientX-r.left,my=ev.clientY-r.top;
+   hover=null;let best=100;
+   for(const n of G.nodes){const d=Math.hypot(n.x-mx,n.y-my);
+     if(d<12&&d<best){best=d;hover=n;}}
+   if(hover){tip.style.display='block';tip.textContent=hover.kind+' · '+hover.label;
+     tip.style.left=(mx+14)+'px';tip.style.top=(my+10)+'px';cv.style.cursor='pointer';}
+   else{tip.style.display='none';cv.style.cursor='crosshair';}
+   draw();
+ });
+ cv.addEventListener('wheel',ev=>{ev.preventDefault();},
+                    {passive:false});
+ window.addEventListener('resize',()=>{fit();draw();});
+ draw();
+})();
+</script>""" % gjson)
+
         parts.append("</body></html>")
         return "\n".join(parts)
 
@@ -6771,6 +7226,12 @@ def build_parser():
     p.add_argument("--beian", default="", help="已知备案号（作为强锚点，可选）")
     p.add_argument("--active", action="store_true", help="启用主动扫描（端口/批量探测），需授权")
     p.add_argument("--cscan", action="store_true", help="扩展扫描 C 段（隐含主动）")
+    p.add_argument("--asn", action="append", default=[],
+                   help="目标 ASN（如 AS12345，可多次）：列出宣告网段，作报告线索")
+    p.add_argument("--scan-asn", action="store_true", dest="scan_asn",
+                   help="扫描目标自有/指定 ASN 的宣告网段（隐含主动，需授权；上限 4096 IP）")
+    p.add_argument("--watch", type=int, default=0, metavar="MIN",
+                   help="持续监控：每 N 分钟重扫一次并对比基线（Ctrl+C 停止）")
     p.add_argument("--full-ports", action="store_true", help="全端口 1-65535（很慢）")
     p.add_argument("--top", type=int, default=0, help="使用前 N 个常见端口")
     p.add_argument("--ports", default="", help='自定义端口，如 "80,443,8000-8100"')
@@ -6873,6 +7334,12 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
                             for d in (domains or ())))
     eng.domains = domains
     eng.input_ips = ips
+    # 手动指定的 ASN：只列前缀作线索（扫描要显式 --scan-asn）
+    if getattr(args, "asn", None):
+        for a in args.asn:
+            if a and a.upper() not in eng.anchor["asns"]:
+                eng.anchor["asns"].add(a.upper())
+        eng.expand_asn_scope(args.asn, scan=False)
     intel_path = getattr(args, "intel", "") or ""
     if intel_path:
         eng.intel = load_intel(intel_path)
@@ -6945,6 +7412,13 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
             eng.collect_keyword_leads()
         progress(25, "被动收集（第三方数据源）")
         eng.collect_passive()
+        if not fast:
+            progress(44, "归属扩展（统计ID/令牌/证书）")
+            eng.expand_identity_pivots()
+        if getattr(args, "scan_asn", False):
+            progress(47, "ASN 网段扩展")
+            asns = set(getattr(args, "asn", None) or []) | set(eng.anchor["asns"])
+            eng.expand_asn_scope(asns, scan=True)
         # 搜索引擎风险情报（dork：后台入口 / GitHub 泄露，不触碰目标）
         if not getattr(args, "no_hints", False):
             progress(45, "搜索引擎风险情报")
@@ -7039,6 +7513,8 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     QUIET = args.quiet
+    if getattr(args, "scan_asn", False):
+        args.active = True
 
     try:
         # 不强制改编码（避免与控制台代码页冲突），只让不可编码字符不报错
@@ -7126,21 +7602,36 @@ def main():
     if args.cscan:
         args.active = True
 
-    eng, files, json_path, md_path = run_pipeline(args, names, domains, ips)
+    watch = max(0, int(getattr(args, "watch", 0) or 0))
+    round_no = 0
+    while True:
+        round_no += 1
+        if watch and round_no > 1:
+            print("\n== 持续监控：第 %d 轮 ==" % round_no)
+        eng, files, json_path, md_path = run_pipeline(args, names, domains, ips)
 
-    # 终端摘要
-    counts = {"确认": 0, "疑似": 0, "存疑": 0}
-    for a in eng.assets.values():
-        counts[a.confidence] = counts.get(a.confidence, 0) + 1
-    print("")
-    print("=" * 64)
-    print("完成：确认 %d | 疑似 %d | 剔除 %d | 合计 %d"
-          % (counts["确认"], counts["疑似"], counts["存疑"], len(eng.assets)))
-    if files.get("confirmed"):
-        print("确认台账：%s" % files["confirmed"])
-    if md_path:
-        print("报告：%s" % md_path)
-    print("=" * 64)
+        # 终端摘要
+        counts = {"确认": 0, "疑似": 0, "存疑": 0}
+        for a in eng.assets.values():
+            counts[a.confidence] = counts.get(a.confidence, 0) + 1
+        print("")
+        print("=" * 64)
+        print("完成：确认 %d | 疑似 %d | 剔除 %d | 合计 %d"
+              % (counts["确认"], counts["疑似"], counts["存疑"], len(eng.assets)))
+        if files.get("confirmed"):
+            print("确认台账：%s" % files["confirmed"])
+        if md_path:
+            print("报告：%s" % md_path)
+        print("=" * 64)
+        if not watch:
+            break
+        print("持续监控：%d 分钟后进行第 %d 轮（Ctrl+C 停止）"
+              % (watch, round_no + 1))
+        try:
+            time.sleep(watch * 60)
+        except KeyboardInterrupt:
+            print("\n已停止持续监控。")
+            break
     return 0
 
 
