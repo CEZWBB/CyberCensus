@@ -1655,6 +1655,29 @@ def search_result_urls(query, timeout=15):
     return urls
 
 
+def search_360_urls(query, timeout=15):
+    """360 搜索（so.com）结果 URL —— 国内内容检索比 Bing 稳定。
+
+    360 的每条结果在 <h3> 里带 data-mdurl（真实目标地址），
+    无需跟随跳转；适合做 site:运营商根域 关键词检索。
+    """
+    urls = []
+    try:
+        url = "https://www.so.com/s?q=" + urllib.parse.quote(query)
+        html = http_get(url, timeout=timeout, retries=1,
+                        headers={"Accept": "text/html, */*", "User-Agent": UA})
+        for m in re.finditer(r"<h3[^>]*>.*?</h3>", html, re.S):
+            md = re.search(r'data-mdurl="([^"]+)"', m.group(0))
+            if not md:
+                continue
+            u = md.group(1).replace("&amp;", "&").strip()
+            if u.startswith("http") and u not in urls:
+                urls.append(u)
+    except Exception:
+        pass
+    return urls
+
+
 def discover_domains_from_search(name, max_candidates=5, lookup=None):
     """从搜索引擎结果提取候选官网域名，返回 [(host, score), ...] 按分排序。
 
@@ -3597,31 +3620,62 @@ class Engine(object):
             log("基线保存失败: %s" % str(e)[:80], "!")
 
     # ---- 4.7 搜索引擎风险情报（dork，不触碰目标） ----
-    def collect_keyword_leads(self, max_queries=6):
-        """搜索引擎精确关键词线索（无平台 Key 时模拟内容检索）。
+    def collect_keyword_leads(self, max_queries=8):
+        """Bing + 360 内容检索（无平台 Key 时模拟 FOFA title/body 搜索）。
 
-        专门解决"双流移动 / 双流电信"这类**区县级短名**：本地没有
-        FOFA 那种资产库，但搜索引擎收录的页面里常有运营商省级域下的
-        具体页面。这里把命中 URL 作为线索列出，并把运营商集团域下的
-        省级主机（如 sc.10086.cn）当作**弱锚点**（结果只进疑似）。
+        专门解决"双流移动 / 双流电信"这类区县短名：
+        · 360 对 `site:10086.cn 四川移动` 能返回 www.sc.10086.cn 等真实页面；
+        · 单独一条结果不算数，**同一运营商根域+省缩写至少 2 次命中**才作为
+          弱锚点（只进疑似）——避免把 tj/zj/fj 等无关省份卷进来；
+        · 命中 URL 全部列入报告「风险线索」，页面路径进「路径/接口线索」。
         """
         names = [n for n in self.names if n][:4]
         if not names:
             return
         roots = [d for d in sorted(self.anchor["domains"]) if d][:2]
+        brands = {_decode_region_brand(n)[2] for n in names}
+        brands.discard("")
+        op_roots = []
+        for b in sorted(brands):
+            for r in OPERATOR_ROOTS.get(b, ()):
+                if r not in op_roots:
+                    op_roots.append(r)
+        prov_map = {}
+        for prov, codes in PROVINCE_CODES.items():
+            for c in codes:
+                if len(c) == 2:
+                    prov_map[c] = prov
+        allowed_provs = set()
+        for n in names:
+            allowed_provs |= set(_province_codes(n))
+        places = []
+        for n in names:
+            _prov, city, _brand = _decode_region_brand(n)
+            place = city or _extract_place(n)
+            for py in _pinyin_variants(place):
+                if py and py not in places:
+                    places.append(py)
+
         queries = []
         for n in names:
-            queries.append('"%s"' % n)
+            queries.append(n)
             for r in roots:
                 if r and r not in n:
+                    queries.append("site:%s %s" % (r, n))
+            for r in op_roots[:2]:
+                if r not in n:
                     queries.append("site:%s %s" % (r, n))
         queries = list(dict.fromkeys(queries))[:max_queries]
         if not queries:
             return
-        log("关键词线索检索（搜索引擎内容命中，最多 %d 条查询）" % len(queries))
+        log("关键词线索检索（Bing + 360 内容检索，最多 %d 条查询）"
+            % len(queries))
         hits, added = 0, 0
+        votes = {}
         for q in queries:
-            for u in search_result_urls(q):
+            urls = list(dict.fromkeys(
+                search_result_urls(q) + search_360_urls(q)))
+            for u in urls:
                 host = _url_host(u)
                 if not host:
                     continue
@@ -3642,16 +3696,41 @@ class Engine(object):
                     added += 1
                     continue
                 root = root_domain(host)
-                if root in OPERATOR_ROOT_DOMAINS:
-                    depth = host.count(".") - root.count(".")
-                    if depth >= 1 and not host.startswith(("www.", "m.")):
-                        if host not in self.anchor["domains"]:
-                            self.domains.add(host)
-                            self.anchor["domains"].add(host)
-                            self.anchor["weak_domains"].add(host)
-                            log("  搜索命中运营商省级域，作为弱锚点（只进疑似）: %s"
-                                % host, "+")
-                            added += 1
+                if root not in OPERATOR_ROOT_DOMAINS:
+                    continue
+                labels = host.split(".")
+                segs = labels + [p.lower() for p in path.split("/") if p]
+                prov_hits = [c for c in segs if c in prov_map]
+                low = (host + path).lower()
+                place_hit = (any(pl in labels for pl in places if pl)
+                             or any(len(pl) >= 4 and pl in low
+                                    for pl in places if pl))
+                if place_hit and not host.startswith(("www.", "m.")):
+                    if host not in self.anchor["domains"]:
+                        self.domains.add(host)
+                        self.anchor["domains"].add(host)
+                        self.anchor["weak_domains"].add(host)
+                        log("  搜索命中区县运营商域（弱锚点）: %s" % host, "+")
+                        added += 1
+                    continue
+                for pc in prov_hits:
+                    if allowed_provs and pc not in allowed_provs:
+                        continue
+                    votes[(root, pc)] = votes.get((root, pc), 0) + 1
+        # 多结果共识：同根域+省缩写至少 2 次命中 → 省级弱锚点（只进疑似）
+        for (root, pc), cnt in sorted(votes.items(), key=lambda kv: -kv[1]):
+            if cnt < 2:
+                continue
+            host = "%s.%s" % (pc, root)
+            if host in self.anchor["domains"]:
+                continue
+            self.domains.add(host)
+            self.anchor["domains"].add(host)
+            self.anchor["weak_domains"].add(host)
+            self.add_asset(host, None, None, source="search:consensus")
+            log("  内容检索共识：%s 命中 %d 次 → 弱锚点 %s（只进疑似）"
+                % (pc, cnt, host), "+")
+            added += 1
         if hits:
             log("关键词线索: %d 条搜索命中，%d 个主机进入台账（报告查看）"
                 % (hits, added), "+")

@@ -1715,7 +1715,10 @@ class TestKeywordSearch(unittest.TestCase):
                     "https://www.10086.cn/x",
                     "https://news.example.com/a"]
         cybercensus.search_result_urls = fake
+        orig360 = cybercensus.search_360_urls
+        cybercensus.search_360_urls = lambda q: []
         self.addCleanup(cybercensus.__setattr__, "search_result_urls", orig)
+        self.addCleanup(cybercensus.__setattr__, "search_360_urls", orig360)
         e.collect_keyword_leads()
         # 省级运营商域成为弱锚点（只进疑似）；www 根域不整体纳入
         self.assertIn("sc.10086.cn", e.anchor["weak_domains"])
@@ -1723,6 +1726,32 @@ class TestKeywordSearch(unittest.TestCase):
         self.assertTrue(any("双流移动" in k for k, _ in e.risk_hints))
         self.assertIn(("sc.10086.cn", "/shuangliu/index.html", "search"),
                       e.web_paths)
+
+    def test_content_consensus_weak_anchor(self):
+        """同一运营商省域在多次搜索结果中出现 → 省级弱锚点。"""
+        e = cybercensus.Engine(argparse.Namespace(
+            beian="", threads=10, timeout=5))
+        e.names = ["双流电信"]
+        orig = cybercensus.search_result_urls
+        orig360 = cybercensus.search_360_urls
+        cybercensus.search_result_urls = lambda q: []
+        cybercensus.search_360_urls = lambda q: [
+            "https://sc.189.cn/a", "https://sc.189.cn/b",
+            "https://cloudmeeting.189.cn/x"]
+        self.addCleanup(cybercensus.__setattr__, "search_result_urls", orig)
+        self.addCleanup(cybercensus.__setattr__, "search_360_urls", orig360)
+        e.collect_keyword_leads()
+        self.assertIn("sc.189.cn", e.anchor["weak_domains"])
+        self.assertNotIn("189.cn", e.anchor["domains"])
+
+    def test_360_urls_parser(self):
+        orig = cybercensus.http_get
+        cybercensus.http_get = lambda url, **kw: (
+            '<h3><a data-mdurl="https://sc.189.cn/a">x</a></h3>'
+            '<h3><a data-mdurl="https://www.189.cn/sc/">y</a></h3>')
+        self.addCleanup(cybercensus.__setattr__, "http_get", orig)
+        self.assertEqual(cybercensus.search_360_urls("q"),
+                         ["https://sc.189.cn/a", "https://www.189.cn/sc/"])
 
 
 class TestReportFormats(unittest.TestCase):
