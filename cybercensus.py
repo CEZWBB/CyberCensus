@@ -6207,16 +6207,13 @@ EXT_BINARIES = {
 
 
 def ext_path(name):
-    """查找外部工具：优先 PATH，其次 exe/脚本同级的 tools/、bin/ 目录。
+    """查找外部工具：优先程序同级的 tools/、bin/，找不到再用 PATH。
 
-    这样发布时可以把工具放在 CyberCensus.exe 旁边的 tools/ 里，
-    用户无需改 PATH；没有时退回 PATH 查找。
+    这样发布包里的工具版本是确定的（不会被本机旧版 PATH 覆盖），
+    源码运行时也优先用项目下的 `tools/`（没有就退回本机 PATH）。
     """
-    p = shutil.which(name)
-    if p:
-        return p
     base = _base_dir()
-    dirs = [base, os.path.join(base, "tools"), os.path.join(base, "bin")]
+    dirs = [os.path.join(base, "tools"), os.path.join(base, "bin"), base]
     # PyInstaller 单文件模式：--add-binary 打包进去的工具解压在 _MEIPASS/tools
     meipass = getattr(sys, "_MEIPASS", "")
     if meipass:
@@ -6228,7 +6225,7 @@ def ext_path(name):
             fp = os.path.join(d, name + ext)
             if os.path.isfile(fp):
                 return fp
-    return ""
+    return shutil.which(name) or ""
 
 
 def ext_available():

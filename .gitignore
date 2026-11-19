@@ -28,3 +28,6 @@ Thumbs.db
 .idea/
 .vscode/
 outputs/
+
+# 本地增强引擎二进制（发布包会单独附带，不进仓库）
+tools/*.exe

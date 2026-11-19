@@ -2262,6 +2262,23 @@ class TestProgressAndToolPaths(unittest.TestCase):
         self.assertNotIn("-u", seen["cmd"])
 
     @unittest.skipUnless(os.name == "nt", "Windows 路径查找")
+    def test_ext_path_prefers_local_tools_over_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            tools = os.path.join(d, "tools")
+            os.makedirs(tools)
+            exe = os.path.join(tools, "nuclei.exe")
+            with open(exe, "wb") as f:
+                f.write(b"MZ")
+            orig_which = cybercensus.shutil.which
+            orig_base = cybercensus._base_dir
+            cybercensus.shutil.which = lambda name: r"C:\other\nuclei.exe"
+            cybercensus._base_dir = lambda: d
+            self.addCleanup(cybercensus.shutil.__setattr__,
+                            "which", orig_which)
+            self.addCleanup(cybercensus.__setattr__, "_base_dir", orig_base)
+            self.assertEqual(cybercensus.ext_path("nuclei"), exe)
+
+    @unittest.skipUnless(os.name == "nt", "Windows 路径查找")
     def test_ext_path_finds_bundled_tools(self):
         with tempfile.TemporaryDirectory() as d:
             tools = os.path.join(d, "tools")
