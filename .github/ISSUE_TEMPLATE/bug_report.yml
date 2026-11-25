@@ -1,0 +1,61 @@
+name: Bug 报告
+description: 程序报错、结果异常、界面问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请先确认你使用的是最新 Release，并已阅读 README 的常见问题。
+        **请勿粘贴真实客户数据、API Key、内网地址或未脱敏的扫描结果。**
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 界面标题或 `CyberCensus.exe --version` 显示的版本
+      placeholder: "0.9.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 运行模式
+      options:
+        - 纯被动 (--no-probe)
+        - 标准
+        - 复核 (--verify)
+        - 主动 (--active)
+        - 仅界面/非扫描问题
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 输入了什么（请脱敏）、点了什么、期望结果与实际结果
+      placeholder: |
+        1. 输入 ...
+        2. 点击 ...
+        3. 实际 ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 报错
+      description: 运行日志最后 30 行，或 Python traceback（请脱敏）
+      render: text
+  - type: input
+    id: os
+    attributes:
+      label: 系统与运行方式
+      placeholder: "Windows 11 / 单文件 exe / 源码 Python 3.11"
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认只对自有或已获书面授权的目标使用本工具
+          required: true
+        - label: 我已移除日志/截图中的 API Key、客户数据和内网信息
+          required: true

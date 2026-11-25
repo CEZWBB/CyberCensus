@@ -1,6 +1,15 @@
 # CyberCensus —— 单位名称 / 域名 / IP 的互联网暴露面测绘工具
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D4.svg)](#)
+[![Version](https://img.shields.io/badge/version-0.9.0-22d3ee.svg)](CHANGELOG.md)
+
+**English:** [README.en.md](README.en.md)
+
 > 给一个**单位名称、域名或 IP**，自动找出该单位暴露在公网上的资产，并按证据强度分成 **确认 / 疑似 / 剔除** 三份台账——**误报不进确认清单**。
+
+> ⚠️ **仅限自有资产或已获书面授权的目标使用。** 默认被动；主动扫描会真实访问目标，请先确认授权。详见 [SECURITY.md](SECURITY.md) 与文末「注意事项」。
 
 **解决什么问题**：政府、医院、学校、企业往往不清楚自己在互联网上开放了多少系统（官网、挂号系统、OA、测试环境……）。本工具从单位名称出发，聚合多平台数据源 + 本地被动采集，把"属于这家单位的公网资产"梳理成一份能直接交付的台账。
 
@@ -674,3 +683,22 @@ A：所有平台差异都集中在 `providers.py`。改 `translate()`（查询�
 5. 发现的凭证、数据、接口漏洞只在授权范围内留存与报告。
 6. "剔除"和"疑似"资产不要直接写进正式报告，先人工核实，避免把第三方资产算成客户的。
 7. 平台 API 的字段和语法可能调整；如果某个平台突然全空，先用 `--debug-provider` 看报错。
+
+---
+
+## 开源、安全与贡献
+
+- **许可证**：[MIT](LICENSE) —— 可自由使用、修改、分发，需保留版权与许可声明。
+- **安全政策**：[SECURITY.md](SECURITY.md) —— 授权使用边界、漏洞私下报告方式、凭据与数据约定。
+- **贡献指南**：[CONTRIBUTING.md](CONTRIBUTING.md) —— 开发环境、测试要求、平台适配扩展方式、不接受的功能类型。
+- **第三方组件**：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) —— Python 依赖与随包分发的 subfinder/httpx/nuclei/wafw00f 许可。
+- **更新记录**：[CHANGELOG.md](CHANGELOG.md)。
+- **行为准则**：[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+
+提交 Issue/PR 前请确认：
+
+- 只对自有或已获书面授权的目标使用；
+- 不提交真实 API Key、客户数据、扫描结果和内网信息；
+- 不提交弱口令爆破、验证码绕过、批量攻击或规避检测类功能。
+
+> 本项目按“现状”提供，不附带任何明示或暗示的担保；使用者自行承担合规与操作风险。

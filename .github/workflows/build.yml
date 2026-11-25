@@ -62,4 +62,5 @@ jobs:
           files: |
             dist/CyberCensus.exe
             dist/CyberCensus-win64.zip
+            dist/SHA256SUMS.txt
           generate_release_notes: true

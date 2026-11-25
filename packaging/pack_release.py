@@ -18,6 +18,7 @@
 """
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -88,6 +89,41 @@ def _copy_templates(templates_dir):
     return True
 
 
+def _copy_legal_files():
+    for name in ("LICENSE", "THIRD_PARTY_NOTICES.md", "README.md",
+                 "README.en.md", "SECURITY.md", "CONTRIBUTING.md",
+                 "CODE_OF_CONDUCT.md", "CHANGELOG.md"):
+        src = os.path.join(ROOT, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(PKG, name))
+            print("  + %s" % name)
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_checksums():
+    lines = []
+    for name in ("CyberCensus.exe", "tools/subfinder.exe", "tools/httpx.exe",
+                 "tools/wafw00f.exe", "tools/nuclei.exe"):
+        p = os.path.join(PKG, name.replace("/", os.sep))
+        if os.path.isfile(p):
+            lines.append("%s  %s" % (_sha256(p), name))
+    if lines:
+        text = "\n".join(lines) + "\n"
+        with open(os.path.join(PKG, "SHA256SUMS.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write(text)
+        with open(os.path.join(DIST, "SHA256SUMS.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write(text)
+
+
 def _write_readme():
     path = os.path.join(PKG, "使用说明.txt")
     with open(path, "w", encoding="utf-8") as f:
@@ -128,6 +164,8 @@ def main():
     _copy_tools()
     if not args.no_templates:
         _copy_templates(args.templates)
+    _copy_legal_files()
+    _write_checksums()
     _write_readme()
 
     print("== 压缩 ==")

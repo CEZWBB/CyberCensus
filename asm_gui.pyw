@@ -55,7 +55,7 @@ except ImportError:
 
 from tkinter import messagebox, filedialog, Menu  # noqa: E402
 
-APP_TITLE = "CyberCensus · 互联网暴露面测绘工具"
+APP_TITLE = "CyberCensus v%s · 互联网暴露面测绘工具" % cybercensus.__version__
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 # 界面模式选项 -> 流水线模式

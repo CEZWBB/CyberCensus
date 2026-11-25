@@ -1,0 +1,40 @@
+# 更新日志
+
+本项目遵循语义化版本（`主版本.次版本.修订号`）。
+
+## [0.9.0] - 2026-11-25
+
+首个公开开源预览版。
+
+### 核心
+
+- 单位名称 / 域名 / IP / CIDR → 互联网暴露面台账
+- A/B/C 证据分级：确认（A≥1 或 B≥2）/ 疑似 / 剔除（含剔除原因）
+- 备案号主号比较、证书 O=、统一社会信用代码、政府网站标识码、公安备案
+- 非备案归属证据：联系邮箱/电话、页脚单位、互链、统计 ID、验证令牌、RDAP、自有 ASN、LEI/VAT/DUNS
+
+### 数据源
+
+- 本地被动源：搜索引擎官网自举、crt.sh、RapidDNS、HackerTarget、OTX、urlscan、Wayback、Shodan InternetDB、App Store
+- 平台联动（可选 Key）：FOFA、0.zone、Hunter、DayDayMap、ZoomEye、360 Quake、Shodan、Censys
+- 归属扩展：统计/像素 ID、Google/Bing/Facebook 验证令牌、证书 SAN 兄弟域、MX/SPF 域名
+
+### 主动能力（需书面授权）
+
+- 端口扫描、Web 指纹、敏感路径、路径/接口线索、ASN 网段扩展
+- 外部引擎：subfinder / httpx / wafw00f / nuclei（随完整包分发，可在线更新）
+
+### 界面与报告
+
+- CustomTkinter 深色界面；四种模式；能力矩阵；本机引擎状态
+- 进度条百分比 + 阶段 + 预计剩余时间
+- 资产表排序、搜索、多选、全选、批量改判、复制 URL/主机、导出选中 CSV
+- 报告导出：HTML / PDF / Word / TXT / Markdown / CSV / JSON
+- 资产关系图谱（HTML 可交互 canvas）
+- 持续监控（`--watch`）+ 基线对比 + Webhook
+
+### 工程
+
+- 255 项离线单元测试
+- GitHub Actions：测试 + Windows exe/完整包构建
+- 增强引擎在线检查/更新（GitHub Release + 镜像回退 + 版本校验回滚）

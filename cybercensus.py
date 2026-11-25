@@ -48,6 +48,8 @@ import gzip
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+__version__ = "0.9.0"
+
 # ----------------------------------------------------------------------------
 # 可选依赖
 # ----------------------------------------------------------------------------
@@ -7219,6 +7221,8 @@ def build_parser():
   python cybercensus.py -d example.com --active --top 200
   python cybercensus.py -d example.com --active --cscan
 """)
+    p.add_argument("--version", action="version",
+                   version="CyberCensus %s" % __version__)
     p.add_argument("target", nargs="?", help="自动识别：域名 / IP / 单位名称")
     p.add_argument("-n", "--name", action="append", default=[], help="单位名称（可多次）")
     p.add_argument("-d", "--domain", action="append", default=[], help="域名（可多次）")

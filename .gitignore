@@ -22,6 +22,20 @@ build_tmp/
 dist/
 *.spec
 
+# 运行期/本地敏感文件
+.env
+.env.*
+*.log
+baseline.json
+*.old
+*.bak
+
+# 测试与覆盖率缓存
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
 # 系统与编辑器
 Thumbs.db
 .DS_Store
@@ -30,4 +44,5 @@ Thumbs.db
 outputs/
 
 # 本地增强引擎二进制（发布包会单独附带，不进仓库）
-tools/*.exe
+tools/*
+!tools/README.txt
