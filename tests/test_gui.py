@@ -188,5 +188,28 @@ class TestBuildArgs(unittest.TestCase):
         self.assertEqual(args.ports_list, list(gui.cybercensus.DEFAULT_PORTS))
 
 
+class TestAssetHelpers(unittest.TestCase):
+    def _asset(self, host, port=None, scheme=None):
+        class A(object):
+            pass
+        a = A()
+        a.host, a.ip, a.port, a.scheme = host, "", port, scheme
+        return a
+
+    def test_asset_url_default_ports(self):
+        self.assertEqual(gui.App._asset_url(None, self._asset("a.com", 443, "https")),
+                         "https://a.com")
+        self.assertEqual(gui.App._asset_url(None, self._asset("a.com", 80, "http")),
+                         "http://a.com")
+        self.assertEqual(gui.App._asset_url(None, self._asset("a.com", 8443, "https")),
+                         "https://a.com:8443")
+        self.assertEqual(gui.App._asset_url(None, self._asset("a.com", None, None)),
+                         "http://a.com")
+
+    def test_sel_key(self):
+        self.assertEqual(gui.App._sel_key(self._asset("a.com", 443, "https")),
+                         "a.com|443")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

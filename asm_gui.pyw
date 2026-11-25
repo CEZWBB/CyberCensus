@@ -18,6 +18,7 @@ asm_gui.pyw —— 互联网暴露面测绘工具 图形界面（现代深色主
 """
 
 import argparse
+import csv
 import json
 import os
 import queue
@@ -52,7 +53,7 @@ except ImportError:
         "或直接双击 启动界面.bat（会自动安装）。")
     raise SystemExit(1)
 
-from tkinter import messagebox, filedialog  # noqa: E402
+from tkinter import messagebox, filedialog, Menu  # noqa: E402
 
 APP_TITLE = "CyberCensus · 互联网暴露面测绘工具"
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -286,6 +287,9 @@ class App(ctk.CTk):
         self._eta = None
         self._auto_timer = None
         self._last_watch = 0
+        self._checked = set()       # 勾选的资产 key: "host|port"
+        self._sort_col = None
+        self._sort_rev = False
         self._prog_samples = []      # [(time, pct), ...] 用于按最近速率估算
         self._eta_samples = []       # 最近的原始 ETA，取中位数抗抖动
         self._last_prog_time = 0.0
@@ -744,12 +748,61 @@ class App(ctk.CTk):
             tab_assets, text="点击上方卡片筛选；再次点击取消 · 双击资产行可人工复核",
             font=self.f_mono_sm, text_color=GRAY, anchor="w")
         self.lbl_filter.pack(fill="x", padx=8, pady=(2, 1))
-        cols = ("分类", "主机", "IP", "端口", "标题", "敏感发现", "归属说明")
-        widths = (64, 190, 115, 55, 190, 150, 330)
+
+        # ---- 批量操作工具栏 ----
+        frm_sel = ctk.CTkFrame(tab_assets, fg_color="transparent")
+        frm_sel.pack(fill="x", padx=8, pady=(0, 3))
+        self.btn_select_all = ctk.CTkButton(
+            frm_sel, text="☐ 全选", width=82, height=26, corner_radius=6,
+            fg_color="transparent", border_width=1, border_color=STROKE,
+            text_color=ACCENT, hover_color=CARD_HI, font=self.f_mono_sm,
+            command=self._toggle_select_all)
+        self.btn_select_all.pack(side="left")
+        for label, val, color in (("标记确认", "确认", GREEN),
+                                  ("标记疑似", "疑似", ORANGE),
+                                  ("标记存疑", "存疑", GRAY)):
+            ctk.CTkButton(
+                frm_sel, text=label, width=76, height=26, corner_radius=6,
+                fg_color="transparent", border_width=1, border_color=color,
+                text_color=color, hover_color=CARD_HI, font=self.f_mono_sm,
+                command=lambda v=val: self._bulk_mark(v)
+            ).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(
+            frm_sel, text="复制URL", width=74, height=26, corner_radius=6,
+            fg_color="transparent", border_width=1, border_color=ACCENT,
+            text_color=ACCENT, hover_color=CARD_HI, font=self.f_mono_sm,
+            command=lambda: self._copy_selected("url")
+        ).pack(side="left", padx=(12, 0))
+        ctk.CTkButton(
+            frm_sel, text="复制主机", width=74, height=26, corner_radius=6,
+            fg_color="transparent", border_width=1, border_color=STROKE,
+            text_color=TEXT, hover_color=CARD_HI, font=self.f_mono_sm,
+            command=lambda: self._copy_selected("host")
+        ).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(
+            frm_sel, text="导出选中CSV", width=96, height=26, corner_radius=6,
+            fg_color="transparent", border_width=1, border_color=STROKE,
+            text_color=TEXT, hover_color=CARD_HI, font=self.f_mono_sm,
+            command=self._export_selected
+        ).pack(side="left", padx=(6, 0))
+        self.var_asset_search = ctk.StringVar(value="")
+        ent_search = ctk.CTkEntry(
+            frm_sel, textvariable=self.var_asset_search, width=170, height=26,
+            placeholder_text="搜索主机 / IP / 标题…", font=self.f_mono_sm)
+        ent_search.pack(side="left", padx=(12, 0))
+        ent_search.bind("<KeyRelease>", lambda e: self._render_assets())
+        self.lbl_sel = ctk.CTkLabel(frm_sel, text="已选 0", width=70,
+                                    anchor="e", font=self.f_mono_sm,
+                                    text_color=GRAY)
+        self.lbl_sel.pack(side="right")
+
+        cols = ("选", "分类", "主机", "IP", "端口", "标题", "敏感发现", "归属说明")
+        widths = (32, 54, 160, 100, 46, 145, 100, 220)
         self.tree = ttk.Treeview(tab_assets, columns=cols, show="headings",
                                  selectmode="browse")
         for c, w in zip(cols, widths):
-            self.tree.heading(c, text=c)
+            self.tree.heading(c, text=c,
+                              command=(lambda cc=c: self._sort_by(cc)))
             self.tree.column(c, width=w, anchor="w")
         vsb = ttk.Scrollbar(tab_assets, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -759,6 +812,10 @@ class App(ctk.CTk):
         self.tree.tag_configure("suspect", foreground=ORANGE)
         self.tree.tag_configure("unknown", foreground=GRAY)
         self.tree.bind("<Double-1>", self._on_tree_double)
+        self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<Control-a>", self._on_select_all_key)
+        self.tree.bind("<Control-c>", lambda e: self._copy_selected("url"))
+        self.tree.bind("<Button-3>", self._on_tree_right)
 
         # APP 应用标签页（App Store 发现的移动端资产）
         acols = ("应用名", "开发者", "包名", "归属依据")
@@ -1085,20 +1142,70 @@ class App(ctk.CTk):
                      % total, text_color=GRAY)
         return counts
 
+    @staticmethod
+    def _sel_key(a):
+        return "%s|%s" % (a.host or a.ip or "", a.port or "")
+
+    def _asset_url(self, a):
+        host = a.host or a.ip or ""
+        if not host:
+            return ""
+        scheme = a.scheme or ("https" if str(a.port) in ("443", "8443", "9443")
+                              else "http")
+        try:
+            port = int(a.port or (443 if scheme == "https" else 80))
+        except Exception:
+            port = 443 if scheme == "https" else 80
+        default = (scheme == "https" and port == 443) or (
+            scheme == "http" and port == 80)
+        return "%s://%s%s" % (scheme, host, "" if default else ":%s" % port)
+
+    def _visible_assets(self):
+        eng = self._last_engine
+        if not eng:
+            return []
+        q = (self.var_asset_search.get() or "").strip().lower()
+        items = [a for a in eng.assets.values()
+                 if self._asset_filter is None or a.confidence == self._asset_filter]
+        if q:
+            items = [a for a in items
+                     if q in (a.host or "").lower() or q in (a.ip or "").lower()
+                     or q in (a.title or "").lower()]
+        order = {"确认": 0, "疑似": 1, "存疑": 2}
+        col = self._sort_col
+        if col and col != "选":
+            if col == "分类":
+                key = lambda a: (order.get(a.confidence, 3), a.host or "")
+            elif col == "主机":
+                key = lambda a: (a.host or a.ip or "").lower()
+            elif col == "IP":
+                key = lambda a: a.ip or ""
+            elif col == "端口":
+                key = lambda a: int(a.port or 0)
+            elif col == "标题":
+                key = lambda a: (a.title or "").lower()
+            elif col == "敏感发现":
+                key = lambda a: len(a.findings)
+            elif col == "归属说明":
+                key = lambda a: (cybercensus.plain_evidence(a.evidence) or "").lower()
+            else:
+                key = lambda a: (order.get(a.confidence, 3), a.host or "")
+            items.sort(key=key, reverse=self._sort_rev)
+        else:
+            items.sort(key=lambda a: (order.get(a.confidence, 3),
+                                      a.host or a.ip or "", str(a.port or "")))
+        return items
+
     def _render_assets(self):
-        """按当前筛选状态重绘表格。"""
+        """按当前筛选/搜索/排序状态重绘表格。"""
         self.tree.delete(*self.tree.get_children())
         self._asset_by_iid = {}
         eng = self._last_engine
         if not eng:
             self._update_cards()
             return
-        order = {"确认": 0, "疑似": 1, "存疑": 2}
         tag_map = {"确认": "confirmed", "疑似": "suspect", "存疑": "unknown"}
-        items = [a for a in eng.assets.values()
-                 if self._asset_filter is None or a.confidence == self._asset_filter]
-        items.sort(key=lambda a: (order.get(a.confidence, 3),
-                                  a.host or a.ip or "", str(a.port or "")))
+        items = self._visible_assets()
         for i, a in enumerate(items):
             plain = cybercensus.plain_evidence(a.evidence, max_items=2) or ""
             if a.confidence == "存疑" and a.reject_reason:
@@ -1106,19 +1213,215 @@ class App(ctk.CTk):
             plain = plain or "—"
             findings = "、".join(sorted(f.split("|", 1)[-1] for f in a.findings))
             iid = "row%d" % i
+            checked = self._sel_key(a) in self._checked
             self.tree.insert("", "end", iid=iid, values=(
+                "☑" if checked else "☐",
                 a.confidence, a.host or a.ip or "", a.ip or "", str(a.port or ""),
                 a.title or "", findings, plain),
                 tags=(tag_map.get(a.confidence, "unknown"),))
             self._asset_by_iid[iid] = a
         self._update_cards()
+        self._update_sel_label()
+
+    def _update_sel_label(self):
+        n = sum(1 for a in (self._last_engine.assets.values()
+                            if self._last_engine else [])
+                if self._sel_key(a) in self._checked)
+        try:
+            self.lbl_sel.configure(
+                text="已选 %d" % n, text_color=ACCENT if n else GRAY)
+            vis = self._visible_assets()
+            all_on = bool(vis) and all(self._sel_key(a) in self._checked
+                                       for a in vis)
+            self.btn_select_all.configure(
+                text="☑ 取消全选" if all_on else "☐ 全选")
+        except Exception:
+            pass
 
     def _populate_table(self, eng):
         """把引擎结果填进资产表格（完成扫描后调用）。"""
         self._last_engine = eng
         self._render_assets()
 
+    def _toggle_one(self, a):
+        k = self._sel_key(a)
+        if k in self._checked:
+            self._checked.discard(k)
+        else:
+            self._checked.add(k)
+        self._update_sel_label()
+
+    def _on_tree_click(self, event):
+        if self.tree.identify_column(event.x) != "#1":
+            return
+        iid = self.tree.identify_row(event.y)
+        a = self._asset_by_iid.get(iid)
+        if not a:
+            return
+        self._toggle_one(a)
+        try:
+            vals = list(self.tree.item(iid, "values"))
+            vals[0] = "☑" if self._sel_key(a) in self._checked else "☐"
+            self.tree.item(iid, values=vals)
+        except Exception:
+            self._render_assets()
+        return "break"
+
+    def _on_tree_right(self, event):
+        iid = self.tree.identify_row(event.y)
+        a = self._asset_by_iid.get(iid)
+        if not a:
+            return
+        if iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        m = Menu(self, tearoff=0)
+        m.add_command(label="查看详情 / 人工复核",
+                      command=lambda: self._show_asset_detail(a))
+        m.add_separator()
+        m.add_command(label="标记为确认",
+                      command=lambda: self._bulk_mark("确认"))
+        m.add_command(label="标记为疑似",
+                      command=lambda: self._bulk_mark("疑似"))
+        m.add_command(label="标记为存疑（剔除）",
+                      command=lambda: self._bulk_mark("存疑"))
+        m.add_separator()
+        m.add_command(label="复制 URL",
+                      command=lambda: self._copy_selected("url"))
+        m.add_command(label="复制主机",
+                      command=lambda: self._copy_selected("host"))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _toggle_select_all(self):
+        items = self._visible_assets()
+        if not items:
+            return
+        all_on = all(self._sel_key(a) in self._checked for a in items)
+        for a in items:
+            k = self._sel_key(a)
+            if all_on:
+                self._checked.discard(k)
+            else:
+                self._checked.add(k)
+        self._render_assets()
+
+    def _on_select_all_key(self, event):
+        self._toggle_select_all()
+        return "break"
+
+    def _selected_assets(self):
+        eng = self._last_engine
+        if not eng:
+            return []
+        sel = [a for a in eng.assets.values()
+               if self._sel_key(a) in self._checked]
+        if not sel:
+            # 兼容：没勾选时用表格里的高亮行
+            sel = [self._asset_by_iid[i] for i in self.tree.selection()
+                   if i in self._asset_by_iid]
+        sel.sort(key=lambda a: (a.host or a.ip or "", str(a.port or "")))
+        return sel
+
+    def _bulk_mark(self, new):
+        items = self._selected_assets()
+        if not items:
+            messagebox.showinfo("未选择", "请先勾选资产（表格第一列）或选中表格行。")
+            return
+        changed = 0
+        for a in items:
+            old = a.confidence
+            if old == new:
+                continue
+            a.confidence = new
+            a.evidence = [e for e in a.evidence if not e.startswith("人工复核|")]
+            a.evidence.append("人工复核|批量 %s→%s" % (old, new))
+            if new != "存疑":
+                a.reject_reason = ""
+            changed += 1
+        self._append_log("批量人工复核：%d 个资产 → %s（共选中 %d 个）"
+                         % (changed, new, len(items)), "!")
+        self._render_assets()
+
+    def _copy_selected(self, mode="url"):
+        items = self._selected_assets()
+        if not items:
+            messagebox.showinfo("未选择", "请先勾选资产（表格第一列）或选中表格行。")
+            return
+        lines = []
+        for a in items:
+            if mode == "host":
+                v = a.host or a.ip or ""
+                if a.port and v and ":" not in v:
+                    v = "%s:%s" % (v, a.port)
+            else:
+                v = self._asset_url(a)
+            if v and v not in lines:
+                lines.append(v)
+        if not lines:
+            messagebox.showinfo("没有可复制内容", "选中资产没有可用的主机/URL。")
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append("\n".join(lines))
+            self.update_idletasks()
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+            return
+        self._append_log("已复制 %d 条%s到剪贴板" %
+                         (len(lines), "URL" if mode != "host" else "主机"), "+")
+        self._set_status("● 已复制 %d 条" % len(lines), GREEN)
+
+    def _export_selected(self):
+        items = self._selected_assets()
+        if not items:
+            messagebox.showinfo("未选择", "请先勾选资产或选中表格行。")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出选中资产", defaultextension=".csv",
+            initialfile="cybercensus_selected.csv",
+            filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(["分类", "主机", "IP", "端口", "协议", "标题",
+                            "URL", "归属说明", "证据"])
+                for a in items:
+                    w.writerow([
+                        a.confidence, a.host or "", a.ip or "", a.port or "",
+                        a.scheme or "", a.title or "", self._asset_url(a),
+                        cybercensus.plain_evidence(a.evidence, max_items=5),
+                        ";".join(a.evidence)])
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e))
+            return
+        self._append_log("已导出选中资产 %d 条：%s" % (len(items), path), "+")
+        self._set_status("● 已导出选中资产", GREEN)
+
+    def _sort_by(self, col):
+        if col == "选":
+            return
+        if self._sort_col == col:
+            self._sort_rev = not self._sort_rev
+        else:
+            self._sort_col = col
+            self._sort_rev = False
+        # 表头箭头提示
+        arrow = " ▼" if self._sort_rev else " ▲"
+        for c in self.tree["columns"]:
+            base = c
+            try:
+                self.tree.heading(c, text=base + (arrow if c == col else ""))
+            except Exception:
+                pass
+        self._render_assets()
+
     def _on_tree_double(self, event):
+        if self.tree.identify_column(event.x) == "#1":
+            return          # 双击勾选列不打开详情
         iid = self.tree.identify_row(event.y)
         a = self._asset_by_iid.get(iid)
         if a is not None:
@@ -1421,6 +1724,8 @@ class App(ctk.CTk):
         self.tree_apps.delete(*self.tree_apps.get_children())
         self._asset_filter = None
         self._asset_by_iid = {}
+        self._checked = set()
+        self.var_asset_search.set("")
         self._last_engine = None
         self._apply_card_styles()
         for card in (self.card_confirmed, self.card_suspect, self.card_rejected):
