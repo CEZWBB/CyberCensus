@@ -25,67 +25,81 @@ def fake_engine():
         out=tempfile.mkdtemp(prefix="cc_demo_"),
         output_formats="html"))
     rows = [
-        ("www.demo-hospital.example", 443, "https", "确认",
-         "某市人民医院 - 官方网站", "203.0.113.10",
-         ["A|主域名子域:demo-hospital.example", "A|证书O=一致:某市人民医院",
-          "B|页面备案号一致:京ICP备00000000号"],
-         {"beian": "京ICP备00000000号-1", "cert_org": "某市人民医院",
-          "rdap_org": "某市人民医院", "asn": "AS64500",
-          "asn_org": "DEMO-HOSPITAL-AS",
-          "emails": {"it@demo-hospital.example"},
+        ("www.yunchi.example", 443, "https", "确认",
+         "云驰出行 - 官方网站", "203.0.113.20",
+         ["A|主域名子域:yunchi.example", "A|证书O=一致:云驰出行科技有限公司",
+          "B|页面备案号一致:京ICP备2024000000号"],
+         {"beian": "京ICP备2024000000号-1", "cert_org": "云驰出行科技有限公司",
+          "rdap_org": "云驰出行科技有限公司", "asn": "AS64500",
+          "asn_org": "YUNCHI-MOBILITY-AS",
+          "emails": {"security@yunchi.example"},
           "phones": {"010-00000000"},
-          "authorities": {"某市人民医院"},
-          "trackings": {"ga4:G-DEMO12345"},
-          "verify_tokens": {"google:demo-verification-token"},
-          "credit_code": "91110000MA0000000X",
-          "site_code": "11000000000000000000",
-          "police_beian": "京公网安备 11000000000000号",
-          "registry_ids": {"LEI:DEMO0000000000000000"},
-          "refs": {"his.demo-hospital.example", "reg.demo-hospital.example"},
+          "authorities": {"云驰出行科技有限公司"},
+          "trackings": {"ga4:G-YUNCHI2024"},
+          "verify_tokens": {"google:yunchi-demo-token"},
+          "credit_code": "91110108MA0000000X",
+          "site_code": "11010800000000000000",
+          "police_beian": "京公网安备 11010800000000号",
+          "registry_ids": {"LEI:YUNCHI000000000000000"},
+          "refs": {"src.yunchi.example", "open.yunchi.example"},
           "server": "nginx/1.24.0",
           "tech": "nginx / Vue / jQuery",
-          "title": "某市人民医院 - 官方网站"}),
-        ("his.demo-hospital.example", 443, "https", "确认",
-         "HIS 医院信息系统", "203.0.113.11",
-         ["A|主域名子域:demo-hospital.example", "B|联系邮箱一致:it@demo-hospital.example"],
-         {"emails": {"it@demo-hospital.example"}, "title": "HIS 医院信息系统"}),
-        ("reg.demo-hospital.example", 443, "https", "确认",
-         "预约挂号平台", "203.0.113.12",
-         ["A|证书O=一致:某市人民医院", "B|页脚主办/版权单位一致:某市人民医院"],
-         {"authorities": {"某市人民医院"}, "title": "预约挂号平台"}),
-        ("oa.demo-hospital.example", 8443, "https", "疑似",
-         "OA 办公系统 - 登录", "203.0.113.13",
-         ["B|平台domain命中(待核)", "C|同锚点IP:203.0.113.13"],
-         {"title": "OA 办公系统 - 登录"}),
-        ("test.demo-hospital.example", 443, "https", "疑似",
-         "测试环境", "203.0.113.14",
-         ["B|统计/像素ID一致:ga4:G-DEMO12345"],
-         {"trackings": {"ga4:G-DEMO12345"}, "title": "测试环境"}),
-        ("vpn.demo-hospital.example", 443, "https", "疑似",
-         "SSL VPN", "203.0.113.15",
-         ["C|平台IP命中:203.0.113.15"],
-         {"title": "SSL VPN"}),
-        ("old.demo-hospital.example", 80, "http", "存疑",
-         "站点已迁移", "203.0.113.16",
+          "source": "crt.sh",
+          "title": "云驰出行 - 官方网站"}),
+        ("src.yunchi.example", 443, "https", "确认",
+         "云驰安全应急响应中心", "203.0.113.21",
+         ["A|主域名子域:yunchi.example", "A|证书O=一致:云驰出行科技有限公司",
+          "B|统计/像素ID一致:ga4:G-YUNCHI2024"],
+         {"cert_org": "云驰出行科技有限公司", "trackings": {"ga4:G-YUNCHI2024"},
+          "source": "crt.sh", "title": "云驰安全应急响应中心"}),
+        ("open.yunchi.example", 443, "https", "确认",
+         "云驰开放平台 - 开发者中心", "203.0.113.22",
+         ["A|主域名子域:yunchi.example", "B|页脚主办/版权单位一致:云驰出行科技有限公司"],
+         {"authorities": {"云驰出行科技有限公司"}, "source": "搜索引擎",
+          "title": "云驰开放平台 - 开发者中心"}),
+        ("api.yunchi.example", 443, "https", "确认",
+         "云驰开放 API 网关", "203.0.113.23",
+         ["A|证书O=一致:云驰出行科技有限公司", "B|联系邮箱一致:security@yunchi.example"],
+         {"cert_org": "云驰出行科技有限公司",
+          "emails": {"security@yunchi.example"}, "source": "httpx",
+          "title": "云驰开放 API 网关"}),
+        ("sso.yunchi.example", 443, "https", "疑似",
+         "统一身份认证 - 登录", "203.0.113.24",
+         ["B|平台domain命中(待核)", "C|同锚点IP:203.0.113.24"],
+         {"source": "FOFA", "title": "统一身份认证 - 登录"}),
+        ("jenkins.yunchi.example", 8080, "http", "疑似",
+         "Jenkins", "203.0.113.25",
+         ["B|统计/像素ID一致:ga4:G-YUNCHI2024", "C|平台IP命中:203.0.113.25"],
+         {"trackings": {"ga4:G-YUNCHI2024"}, "source": "FOFA",
+          "title": "Jenkins"}),
+        ("gitlab.yunchi.example", 443, "https", "疑似",
+         "GitLab", "203.0.113.26",
+         ["C|平台IP命中:203.0.113.26"],
+         {"source": "Hunter", "title": "GitLab"}),
+        ("test.yunchi.example", 443, "https", "疑似",
+         "预发布环境", "203.0.113.27",
+         ["B|平台domain命中(待核)"],
+         {"source": "DayDayMap", "title": "预发布环境"}),
+        ("vpn.yunchi.example", 443, "https", "存疑",
+         "SSL VPN", "203.0.113.28",
          [],
          {"reject_reason": "无任何关联证据"}),
-        ("cdn.demo-hospital.example", 443, "https", "存疑",
-         "CDN 节点", "203.0.113.17",
+        ("cdn.yunchi.example", 443, "https", "存疑",
+         "CDN 节点", "203.0.113.29",
          [],
          {"reject_reason": "第三方云/CDN资源，且无强关联证据"}),
-        ("mail.demo-hospital.example", 443, "https", "存疑",
-         "Webmail", "203.0.113.18",
+        ("mail.yunchi.example", 443, "https", "存疑",
+         "企业邮箱", "203.0.113.30",
          [],
          {"reject_reason": "无任何关联证据"}),
-        ("demo-hospital.example", 443, "https", "确认",
-         "某市人民医院", "203.0.113.10",
-         ["A|证书O=一致:某市人民医院", "A|页面备案号一致:京ICP备00000000号"],
-         {"cert_org": "某市人民医院", "beian": "京ICP备00000000号-1",
-          "rdap_org": "某市人民医院", "asn": "AS64500",
-          "asn_org": "DEMO-HOSPITAL-AS", "title": "某市人民医院"}),
+        ("old.yunchi.example", 80, "http", "存疑",
+         "站点已迁移", "203.0.113.31",
+         [],
+         {"reject_reason": "无任何关联证据"}),
     ]
     for host, port, scheme, conf, title, ip, ev, extra in rows:
         a = e.add_asset(host, port, scheme, source="demo")
+        a.source = {extra.get("source", "crt.sh")}
         a.confidence = conf
         a.title = title
         a.ip = ip
@@ -109,17 +123,17 @@ def fake_engine():
         a.authorities.update(extra.get("authorities") or set())
         a.trackings.update(extra.get("trackings") or set())
         a.findings.update({".git 目录可访问|敏感路径", "Swagger 接口文档|敏感路径"}
-                          if "oa." in host else set())
+                          if host.startswith("jenkins.") else set())
     # 让图谱有足够的连线：非存疑资产都带 ASN，确认资产带证书 O=
     for a in e.assets.values():
         if a.confidence == "存疑":
             continue
         if not a.asn:
-            a.asn, a.asn_org = "AS64500", "DEMO-HOSPITAL-AS"
+            a.asn, a.asn_org = "AS64500", "YUNCHI-MOBILITY-AS"
         if a.confidence == "确认" and not a.cert_org:
-            a.cert_org = "某市人民医院"
-    e.anchor["orgs"].add("某市人民医院")
-    e.anchor["domains"].add("demo-hospital.example")
+            a.cert_org = "云驰出行科技有限公司"
+    e.anchor["orgs"].add("云驰出行科技有限公司")
+    e.anchor["domains"].add("yunchi.example")
     return e
 
 
@@ -150,7 +164,7 @@ def main():
         pass
     app.deiconify()
     e = fake_engine()
-    app.ent_target.insert(0, "某市人民医院")
+    app.ent_target.insert(0, "云驰出行科技有限公司")
     app._preview_target()
     app._populate_table(e)
     app.tabview.set("资产列表")
