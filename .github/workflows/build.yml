@@ -51,13 +51,19 @@ jobs:
           }
 
       - name: Download nuclei templates
-        continue-on-error: true
+        shell: pwsh
         run: |
-          dist\nuclei.exe -update-templates -duc
+          $tpl = Join-Path $env:GITHUB_WORKSPACE "nuclei-templates"
+          New-Item -ItemType Directory -Force $tpl | Out-Null
+          dist\nuclei.exe -update-templates -duc -ud $tpl
+          $yaml = Get-ChildItem $tpl -Recurse -Filter *.yaml -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $yaml) { throw "nuclei templates were not downloaded to $tpl" }
 
       - name: Assemble portable package (exe + tools + templates)
+        shell: pwsh
         run: |
-          python packaging/pack_release.py --skip-exe
+          $tpl = Join-Path $env:GITHUB_WORKSPACE "nuclei-templates"
+          python packaging/pack_release.py --skip-exe --templates $tpl
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
