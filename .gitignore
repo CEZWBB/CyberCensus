@@ -26,6 +26,7 @@ dist/
 .env
 .env.*
 .upload_token
+.gitcode_token
 .git-credentials
 *.log
 baseline.json
