@@ -136,7 +136,7 @@ python asm_gui.pyw
 
 ```bash
 # 只给名称
-python cybercensus.py -n "某某科技有限公司"
+python cybercensus.py -n "某单位"
 
 # 已知域名
 python cybercensus.py -d example.com
