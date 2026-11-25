@@ -1,4 +1,5 @@
 """生成 CSDN 宣传稿用的真实界面截图（不注入任何演示数据）。"""
+import ctypes
 import importlib.util
 import os
 import sys
@@ -26,11 +27,16 @@ def grab(widget, path, topmost=False):
     widget.update_idletasks()
     widget.update()
     time.sleep(0.8)
-    x = widget.winfo_rootx()
-    y = widget.winfo_rooty()
-    w = widget.winfo_width()
-    h = widget.winfo_height()
-    img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+    # 直接抓窗口内容（PrintWindow），锁屏/被遮挡时也能用；
+    # 老版本 Pillow 没有 window 参数时退回屏幕区域截图。
+    hwnd = ctypes.windll.user32.GetAncestor(widget.winfo_id(), 2)
+    try:
+        img = ImageGrab.grab(window=hwnd)
+    except TypeError:
+        x = widget.winfo_rootx()
+        y = widget.winfo_rooty()
+        img = ImageGrab.grab(bbox=(x, y, x + widget.winfo_width(),
+                                   y + widget.winfo_height()))
     img.save(path)
     print("saved", path, img.size)
 
@@ -43,8 +49,12 @@ def main():
     except Exception:
         pass
     app.tabview.set("资产列表")
+    # 第一张只展示主界面，不列出第三方测绘平台/厂商
+    app._sidebar.grid_forget()
     app.deiconify()
+    app.update_idletasks()
     app.update()
+    time.sleep(0.3)
     grab(app, os.path.join(OUT, "01-main.png"), topmost=True)
 
     # 高级参数窗口（真实控件，未改任何值；加宽避免右侧控件被裁）
