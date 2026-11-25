@@ -72,50 +72,34 @@
 
 ---
 
-## 三、实际跑起来是什么样？
+## 三、界面长什么样？
 
-> 实际结果受搜索引擎收录、平台配额和目标网络影响。
+Windows 原生 GUI，不用记命令行。下面都是实际界面截图（尚未开始扫描的初始状态）。
 
-SRC 场景是这类工具最典型的用法：补天 / 漏洞盒子上的厂商通常有官网、开放平台、
-SRC 门户、API 网关、测试环境、CI/CD 等一堆分散资产，正好需要先摸清范围再谈测试。
-
-下面用**虚构的"云驰出行科技有限公司"**（一家典型开了 SRC 的出行科技公司）演示，
-不展示任何真实厂商的资产清单：
-
-- 纯名称模式：从公司名找官网，再用证书 O=、备案号、联系方式互证
-- 有平台 Key：自动追加 domain / cert / ICP / 统计 ID / favicon 查询
-- SRC 门户、开放平台、API 网关这类子域会被单独标出来，测试环境、Jenkins、
-  GitLab 一类边缘系统进入"疑似"，留人工判断
-- 结果进三份台账，确认清单里的每一条都能点开看"为什么算它的"
-
-> 下面四张截图为**虚构演示数据**（公司、域名、IP、备案号、证书信息均为示例），
-> 用来说明界面和证据字段，不代表任何真实单位。
-
-**图 1：主界面 —— 输入单位名称，选模式，开始测绘**
+**图 1：主界面**
 
 ![主界面](screenshots/01-main.png)
 
-左侧是 8 个测绘平台的 Key 状态和四个增强引擎（subfinder / httpx / wafw00f / nuclei）；
-中间三张卡片实时显示确认 / 疑似 / 剔除数量，点一下就只看那一类。
+- 左侧：8 个测绘平台的 Key 状态（未配 Key 会自动禁用）和四个增强引擎的检测结果
+- 中间：目标输入框（名称 / 域名 / IP / 网段，自动识别）、四种模式卡片、进度和剩余时间
+- 三张统计卡片：确认 / 疑似 / 剔除，点一下就只看那一类，再点一次恢复全部
+- 资产列表：全选、批量改判、复制 URL / 复制主机、导出选中 CSV、双击看证据
+- 底部：一键生成报告、打开输出目录、查看网页报告 / Markdown 报告
 
-**图 2：点击"疑似资产"筛选 + 多选批量改判**
+**图 2：高级参数**
 
-![筛选与多选](screenshots/02-list.png)
+![高级参数](screenshots/02-advanced.png)
 
-再点一次同一张卡片恢复全部；勾选后可以批量标确认 / 标疑似 / 标存疑、复制 URL、导出 CSV。
+并发线程、平台翻页、常用端口、全端口 / C 段扩展、敏感路径探测、增强引擎开关、
+Webhook 告警、APP 包分析、路径线索采集、ASN 扫描、持续监控等都在这里，
+改完立即生效；主动相关选项都带"授权"提示。
 
-**图 3：点开任意资产，看它"为什么算这个单位的"**
+**图 3：报告格式选择**
 
-![资产详情](screenshots/03-detail.png)
+![报告格式](screenshots/03-report.png)
 
-证书 O=、RDAP 注册人、备案号、信用代码、ASN、邮箱、电话、页脚单位、统计 ID，
-每条证据都列出来，底部可直接人工改判。
-
-**图 4：HTML 报告里的资产关系图谱**
-
-![资产图谱](screenshots/04-graph.png)
-
-主机、IP、ASN、证书组织、统计 ID 之间的关系一图看清，适合放进交付报告。
+HTML / PDF / Word / TXT / Markdown / CSV / JSON 七种格式可多选；
+HTML 带可交互的资产关系图谱，PDF 由 HTML 无头打印生成。
 
 ---
 
@@ -152,7 +136,7 @@ python asm_gui.pyw
 
 ```bash
 # 只给名称
-python cybercensus.py -n "某某市人民医院"
+python cybercensus.py -n "某某科技有限公司"
 
 # 已知域名
 python cybercensus.py -d example.com
@@ -234,12 +218,11 @@ python cybercensus.py -d example.com --watch 30
 
 **图片上传：**
 
-CSDN 编辑器不会读取仓库里的相对路径，正文粘贴后把下面 4 张图按顺序拖进编辑器，
+CSDN 编辑器不会读取仓库里的相对路径，正文粘贴后把下面 3 张图按顺序拖进编辑器，
 替换掉对应的 `![...](screenshots/xx.png)`：
 
 1. `docs/screenshots/01-main.png`
-2. `docs/screenshots/02-list.png`
-3. `docs/screenshots/03-detail.png`
-4. `docs/screenshots/04-graph.png`
+2. `docs/screenshots/02-advanced.png`
+3. `docs/screenshots/03-report.png`
 
 **封面：** 用 `docs/social-preview.png`（1280×640）。
