@@ -1,6 +1,6 @@
 # 第三方组件与许可
 
-CyberCensus 自身以 **MIT License** 发布（见 `LICENSE`）。发布包中还包含或调用以下第三方组件，它们分别遵循各自的上游许可。本文件随发布包一起分发。
+CyberCensus 自身以 **Apache License 2.0** 发布（见 `LICENSE` 与 `NOTICE`）。发布包中还包含或调用以下第三方组件，它们分别遵循各自的上游许可。本文件随发布包一起分发。
 
 ## Python 依赖
 

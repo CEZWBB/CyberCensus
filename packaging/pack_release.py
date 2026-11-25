@@ -90,9 +90,9 @@ def _copy_templates(templates_dir):
 
 
 def _copy_legal_files():
-    for name in ("LICENSE", "THIRD_PARTY_NOTICES.md", "README.md",
+    for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "README.md",
                  "README.en.md", "SECURITY.md", "CONTRIBUTING.md",
-                 "CODE_OF_CONDUCT.md", "CHANGELOG.md"):
+                 "CODE_OF_CONDUCT.md", "CHANGELOG.md", "COMMERCIAL.md"):
         src = os.path.join(ROOT, name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(PKG, name))

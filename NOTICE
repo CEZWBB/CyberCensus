@@ -1,0 +1,15 @@
+CyberCensus
+Copyright 2026 CyberCensus contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+This product includes or calls third-party software. See
+THIRD_PARTY_NOTICES.md for the list of components, their licenses,
+and links to the corresponding upstream projects.
+
+The names FOFA, 0.zone, Hunter/鹰图, DayDayMap, ZoomEye, Quake,
+Shodan, Censys, subfinder, httpx, nuclei, and wafw00f are trademarks
+or project names of their respective owners. Their use here is for
+identification and interoperability only and does not imply
+endorsement or affiliation.

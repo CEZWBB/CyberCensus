@@ -1,6 +1,6 @@
 # CyberCensus
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4.svg)](#)
 
@@ -68,6 +68,7 @@ The full documentation is currently in Chinese: [README.md](README.md). It cover
 - [SECURITY.md](SECURITY.md) — authorized-use policy and private vulnerability reporting
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and contribution rules
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — dependency and bundled-tool licenses
-- [LICENSE](LICENSE) — MIT
+- [COMMERCIAL.md](COMMERCIAL.md) — open core + commercial services boundary
+- [LICENSE](LICENSE) — Apache-2.0
 
 Provided “as is”, without warranty. You are responsible for authorization, legality, and scan rate.

@@ -1,11 +1,11 @@
 # CyberCensus —— 单位名称 / 域名 / IP 的互联网暴露面测绘工具
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4.svg)](#)
 [![Version](https://img.shields.io/badge/version-0.9.0-22d3ee.svg)](CHANGELOG.md)
 
-**English:** [README.en.md](README.en.md)
+**English:** [README.en.md](README.en.md) · **开源核心/商业服务边界:** [COMMERCIAL.md](COMMERCIAL.md)
 
 > 给一个**单位名称、域名或 IP**，自动找出该单位暴露在公网上的资产，并按证据强度分成 **确认 / 疑似 / 剔除** 三份台账——**误报不进确认清单**。
 
@@ -688,7 +688,8 @@ A：所有平台差异都集中在 `providers.py`。改 `translate()`（查询�
 
 ## 开源、安全与贡献
 
-- **许可证**：[MIT](LICENSE) —— 可自由使用、修改、分发，需保留版权与许可声明。
+- **许可证**：[Apache-2.0](LICENSE) —— 可自由使用、修改、分发、商用，含专利授权；需保留版权/NOTICE、标明修改。版权人见 [NOTICE](NOTICE)。
+- **开源核心 / 商业服务**：[COMMERCIAL.md](COMMERCIAL.md) —— 核心全部开源；私有规则包、私有化实施、托管监控、报告复核、定制与 SLA 作为商业服务，不放进仓库。
 - **安全政策**：[SECURITY.md](SECURITY.md) —— 授权使用边界、漏洞私下报告方式、凭据与数据约定。
 - **贡献指南**：[CONTRIBUTING.md](CONTRIBUTING.md) —— 开发环境、测试要求、平台适配扩展方式、不接受的功能类型。
 - **第三方组件**：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) —— Python 依赖与随包分发的 subfinder/httpx/nuclei/wafw00f 许可。
