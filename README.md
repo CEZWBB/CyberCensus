@@ -1,13 +1,26 @@
+<p align="center"><img src="docs/logo.svg" width="112" alt="CyberCensus logo"></p>
+
 # CyberCensus —— 单位名称 / 域名 / IP 的互联网暴露面测绘工具
+
+<p align="center"><b>Find every exposed asset. Prove every attribution.</b><br>
+不猜、不堆数量：每一条资产都要有证据。</p>
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4.svg)](#)
 [![Version](https://img.shields.io/badge/version-0.9.0-22d3ee.svg)](CHANGELOG.md)
 
+<p align="center"><img src="docs/social-preview.png" alt="CyberCensus - Find every exposed asset. Prove every attribution." width="900"></p>
+
 **English:** [README.en.md](README.en.md) · **开源核心/商业服务边界:** [COMMERCIAL.md](COMMERCIAL.md)
 
 > 给一个**单位名称、域名或 IP**，自动找出该单位暴露在公网上的资产，并按证据强度分成 **确认 / 疑似 / 剔除** 三份台账——**误报不进确认清单**。
+
+### 三个真正的亮点
+
+1. **证据优先，不是"搜到就算"**：每条资产都标注 A/B/C 证据——ICP 备案号主号、证书 `O=`、统一社会信用代码、RDAP 注册人、自有 ASN、统计/像素 ID、验证令牌、联系方式、互链；**A≥1 或 B≥2 才进"确认"**，剔除项写明原因，可人工复核改判。
+2. **只给单位名称也能开工**：搜索引擎官网自举 → 标题/证书互证 → crt.sh 子域 → DNS/whois/IP 反查；**不配任何平台 Key 也能跑**。统计 ID、验证令牌、证书 SAN 兄弟域、MX/SPF 还能继续扩展出"域名不像、也没有备案"的关联站点。
+3. **从发现到交付是一条链**：8 个测绘平台可选联动、持续监控 + 基线对比、资产关系图谱、人工复核、7 种报告格式；Windows 解压双击即用，完整包自带 subfinder/httpx/wafw00f/nuclei 和官方模板。
 
 > ⚠️ **仅限自有资产或已获书面授权的目标使用。** 默认被动；主动扫描会真实访问目标，请先确认授权。详见 [SECURITY.md](SECURITY.md) 与文末「注意事项」。
 

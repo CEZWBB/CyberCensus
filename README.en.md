@@ -1,4 +1,8 @@
+<p align="center"><img src="docs/logo.svg" width="112" alt="CyberCensus logo"></p>
+
 # CyberCensus
+
+<p align="center"><b>Find every exposed asset. Prove every attribution.</b></p>
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
