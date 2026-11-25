@@ -25,6 +25,14 @@ import subprocess
 import sys
 import time
 
+# GitHub Actions 的 Windows 控制台可能是 cp1252；中文 print 会直接崩，
+# 这里让不可编码字符替换输出，保证打包步骤不会因日志编码失败。
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
 # 在临时暂存目录组装，避免用户正开着上一版 CyberCensus.exe 时文件被锁、

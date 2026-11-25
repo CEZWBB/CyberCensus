@@ -7514,18 +7514,20 @@ def run_pipeline(args, names, domains, ips, should_stop=None, do_output=True):
 
 def main():
     global QUIET
+    # 必须在 parse_args 之前设置：Windows CI/控制台是 cp1252 时，
+    # --help 的中文会在 argparse 里触发 UnicodeEncodeError。
+    # 不强制改编码（避免与控制台代码页冲突），只让不可编码字符替换输出。
+    try:
+        sys.stdout.reconfigure(errors="replace")
+        sys.stderr.reconfigure(errors="replace")
+    except Exception:
+        pass
+
     parser = build_parser()
     args = parser.parse_args()
     QUIET = args.quiet
     if getattr(args, "scan_asn", False):
         args.active = True
-
-    try:
-        # 不强制改编码（避免与控制台代码页冲突），只让不可编码字符不报错
-        sys.stdout.reconfigure(errors="replace")
-        sys.stderr.reconfigure(errors="replace")
-    except Exception:
-        pass
 
     # 引擎检查/升级是独立动作，不需要目标
     if getattr(args, "check_engines", False) or getattr(args, "update_engines", False):
