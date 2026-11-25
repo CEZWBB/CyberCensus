@@ -25,6 +25,8 @@ dist/
 # 运行期/本地敏感文件
 .env
 .env.*
+.upload_token
+.git-credentials
 *.log
 baseline.json
 *.old
