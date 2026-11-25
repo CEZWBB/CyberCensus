@@ -82,13 +82,34 @@
 - 有平台 Key：自动追加 domain / cert / ICP / 统计 ID 查询
 - 结果进三份台账，确认清单里的每一条都能点开看"为什么算它的"
 
-【图 1：主界面截图，建议上传 docs/social-preview.png 或实际界面截图】
+> 下面四张截图为**虚构演示数据**（域名、IP、备案号、证书信息均为示例），
+> 用来说明界面和证据字段，不代表任何真实单位。
 
-【图 2：资产列表 + 顶部三张卡片筛选 + 多选批量操作】
+**图 1：主界面 —— 输入单位名称，选模式，开始测绘**
 
-【图 3：资产详情 / 人工复核弹窗】
+![主界面](screenshots/01-main.png)
 
-【图 4：HTML 报告里的资产关系图谱】
+左侧是 8 个测绘平台的 Key 状态和四个增强引擎（subfinder / httpx / wafw00f / nuclei）；
+中间三张卡片实时显示确认 / 疑似 / 剔除数量，点一下就只看那一类。
+
+**图 2：点击"疑似资产"筛选 + 多选批量改判**
+
+![筛选与多选](screenshots/02-list.png)
+
+再点一次同一张卡片恢复全部；勾选后可以批量标确认 / 标疑似 / 标存疑、复制 URL、导出 CSV。
+
+**图 3：点开任意资产，看它"为什么算这个单位的"**
+
+![资产详情](screenshots/03-detail.png)
+
+证书 O=、RDAP 注册人、备案号、信用代码、ASN、邮箱、电话、页脚单位、统计 ID，
+每条证据都列出来，底部可直接人工改判。
+
+**图 4：HTML 报告里的资产关系图谱**
+
+![资产图谱](screenshots/04-graph.png)
+
+主机、IP、ASN、证书组织、统计 ID 之间的关系一图看清，适合放进交付报告。
 
 ---
 
@@ -204,3 +225,15 @@ python cybercensus.py -d example.com --watch 30
 **分类：**
 
 安全 / 网络安全 / 安全工具
+
+**图片上传：**
+
+CSDN 编辑器不会读取仓库里的相对路径，正文粘贴后把下面 4 张图按顺序拖进编辑器，
+替换掉对应的 `![...](screenshots/xx.png)`：
+
+1. `docs/screenshots/01-main.png`
+2. `docs/screenshots/02-list.png`
+3. `docs/screenshots/03-detail.png`
+4. `docs/screenshots/04-graph.png`
+
+**封面：** 用 `docs/social-preview.png`（1280×640）。

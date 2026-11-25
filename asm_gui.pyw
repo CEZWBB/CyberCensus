@@ -342,7 +342,8 @@ class App(ctk.CTk):
                      text_color=GRAY, font=self.f_mono_sm
                      ).grid(row=1, column=1, sticky="nw", pady=(0, 12))
 
-        ctk.CTkLabel(bar, text=" V1.0 ", font=self.f_mono_sm, text_color=ACCENT,
+        ctk.CTkLabel(bar, text=" V%s " % cybercensus.__version__,
+                     font=self.f_mono_sm, text_color=ACCENT,
                      fg_color="#0a2230", corner_radius=4, height=20, padx=6
                      ).grid(row=0, column=2, rowspan=2, padx=(0, 12))
 

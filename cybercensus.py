@@ -6600,7 +6600,7 @@ class Engine(object):
             gjson = json.dumps(graph, ensure_ascii=False).replace("</", "<\\/")
             parts.append("<h2>🕸 资产关系图谱（可交互）</h2>")
             parts.append("<p class='muted'>节点：主机 / IP / ASN / 证书组织 / 统计 ID / 验证令牌。"
-                         "鼠标悬停查看名称；滚动缩放。</p>")
+                         "鼠标悬停查看节点详情。</p>")
             parts.append(
                 "<div id='graph' style='position:relative;width:100%;height:540px;"
                 "background:#070d16;border:1px solid #1b2a3d;border-radius:10px;"
@@ -6619,22 +6619,22 @@ class Engine(object):
    const d=window.devicePixelRatio||1;cv.width=W*d;cv.height=H*d;
    ctx.setTransform(d,0,0,d,0,0);}
  fit();
- const by={};G.nodes.forEach((n,i)=>{by[n.id]=n;
-   n.x=W/2+(Math.random()-0.5)*W*0.7;n.y=H/2+(Math.random()-0.5)*H*0.7;
-   n.vx=0;n.vy=0;});
+ const by={};G.nodes.forEach(n=>{by[n.id]=n;});
  const E=G.edges.filter(e=>by[e.source]&&by[e.target]);
- for(let it=0;it<220;it++){
-   for(let i=0;i<G.nodes.length;i++){const a=G.nodes[i];
-     for(let j=i+1;j<G.nodes.length;j++){const b=G.nodes[j];
-       let dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy+1;
-       if(d2<40000){const f=900/d2;dx*=f;dy*=f;a.vx+=dx;a.vy+=dy;b.vx-=dx;b.vy-=dy;}}}
-   for(const e of E){const a=by[e.source],b=by[e.target];
-     let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
-     const f=(d-70)*0.004;dx*=f;dy*=f;a.vx+=dx;a.vy+=dy;b.vx-=dx;b.vy-=dy;}
-   for(const n of G.nodes){n.vx+=(W/2-n.x)*0.0007;n.vy+=(H/2-n.y)*0.0007;
-     n.vx*=0.86;n.vy*=0.86;n.x+=n.vx;n.y+=n.vy;
-     n.x=Math.max(20,Math.min(W-20,n.x));n.y=Math.max(20,Math.min(H-20,n.y));}
- }
+ // 同心环布局：主机在外、IP 次之，ASN/组织/统计ID 在内，稳定可复现
+ const RING={host:0.45,ip:0.31,asn:0.17,org:0.17,tracking:0.12,token:0.12};
+ const OFFSET={asn:0,org:0.5,tracking:0.25,token:0.75};
+ const groups={};
+ G.nodes.forEach(n=>{ (groups[n.kind]=groups[n.kind]||[]).push(n); });
+ const base=Math.min(W,H);
+ Object.keys(groups).forEach(k=>{
+   const arr=groups[k].sort((a,b)=>String(a.label).localeCompare(String(b.label)));
+   const R=base*(RING[k]||0.4), off=(OFFSET[k]||0)*2*Math.PI;
+   arr.forEach((n,i)=>{
+     const a=-Math.PI/2+off+i*2*Math.PI/arr.length;
+     n.x=W/2+Math.cos(a)*R;n.y=H/2+Math.sin(a)*R;
+   });
+ });
  function draw(){
    ctx.clearRect(0,0,W,H);
    ctx.strokeStyle='rgba(70,110,150,.35)';ctx.lineWidth=1;
@@ -6645,7 +6645,8 @@ class Engine(object):
      ctx.fillStyle=COL[n.kind]||'#8aa0b6';ctx.fill();
      if(n.kind!=='ip'||n===hover){
        ctx.fillStyle='#9fb4c9';ctx.font='10px monospace';
-       ctx.fillText(String(n.label).slice(0,26),n.x+r+3,n.y+3);}
+       const t=String(n.label).slice(0,26), w=ctx.measureText(t).width;
+       ctx.fillText(t, n.x+w+8>W ? Math.max(4,n.x-r-4-w) : n.x+r+3, n.y+3);}
    }
  }
  cv.addEventListener('mousemove',ev=>{
