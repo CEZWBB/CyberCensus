@@ -53,9 +53,16 @@ jobs:
       - name: Download nuclei templates
         shell: pwsh
         run: |
+          # nuclei -update-templates 在部分网络会静默失败/卡住；直接从官方仓库下载 zip 更可靠
           $tpl = Join-Path $env:GITHUB_WORKSPACE "nuclei-templates"
-          New-Item -ItemType Directory -Force $tpl | Out-Null
-          dist\nuclei.exe -update-templates -duc -ud $tpl
+          $zip = Join-Path $env:RUNNER_TEMP "nuclei-templates.zip"
+          $tmp = Join-Path $env:RUNNER_TEMP "nuclei-templates-src"
+          Invoke-WebRequest "https://codeload.github.com/projectdiscovery/nuclei-templates/zip/refs/heads/main" -OutFile $zip
+          if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+          Expand-Archive $zip -DestinationPath $tmp -Force
+          $src = Get-ChildItem $tmp -Directory | Select-Object -First 1
+          if (Test-Path $tpl) { Remove-Item $tpl -Recurse -Force }
+          Move-Item $src.FullName $tpl
           $yaml = Get-ChildItem $tpl -Recurse -Filter *.yaml -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $yaml) { throw "nuclei templates were not downloaded to $tpl" }
 
